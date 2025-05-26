@@ -5,7 +5,7 @@ import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
 
 interface BankTransaction {
-  Date: string | Date | number; // Allow for Date objects or Excel date numbers
+  Date: string | Date | number | null | undefined; // Allow for Date objects or Excel date numbers
   Details: string;
   Description: string;
   Amount: number;
@@ -32,7 +32,7 @@ export default function Home() {
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
 
-  const formatDate = (dateInput: string | Date | number): string => {
+  const formatDate = (dateInput: string | Date | number | null | undefined): string => {
     if (dateInput === null || dateInput === undefined) return '';
     let date: Date;
 
@@ -117,7 +117,7 @@ export default function Home() {
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       
-      const rows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+      const rows: unknown[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
 
       if (rows.length === 0) throw new Error('Sheet is empty or could not be read.');
 
@@ -170,7 +170,7 @@ export default function Home() {
       }
       
       if (colIndexMap.Date === undefined || colIndexMap.Amount === undefined || colIndexMap.DebitCredit === undefined) {
-        let missing = [];
+        const missing: string[] = [];
         if (colIndexMap.Date === undefined) missing.push('"Date"');
         if (colIndexMap.Amount === undefined) missing.push('"Amount"');
         if (colIndexMap.DebitCredit === undefined) missing.push('"Debit/Credit" or similar type indicator');
@@ -182,12 +182,18 @@ export default function Home() {
         const dataRow = rows[i];
         if (!dataRow || dataRow.every(cell => String(cell || '').trim() === '')) continue;
 
-        const dateVal = colIndexMap.Date !== undefined ? dataRow[colIndexMap.Date] : null;
+        const dateValRaw = (colIndexMap.Date !== undefined ? dataRow[colIndexMap.Date] : null) as string | Date | number | null | undefined;
         const amountStr = colIndexMap.Amount !== undefined ? String(dataRow[colIndexMap.Amount] || '').trim() : '';
         const debitCreditVal = colIndexMap.DebitCredit !== undefined ? String(dataRow[colIndexMap.DebitCredit] || '').trim() : '';
 
-        if (!dateVal || amountStr === '' || debitCreditVal === '') {
-          console.warn('Skipping row due to missing essential data (Date, Amount, or Debit/Credit type):', dataRow);
+        // Check for and handle empty objects that might come from empty but formatted date cells
+        let dateVal: string | Date | number | null | undefined = dateValRaw;
+        if (typeof dateValRaw === 'object' && dateValRaw !== null && !(dateValRaw instanceof Date) && Object.keys(dateValRaw).length === 0) {
+            dateVal = null; 
+        }
+
+        if (dateVal === null || dateVal === undefined || amountStr === '' || debitCreditVal === '') {
+          console.warn('Skipping row due to missing essential data (Date, Amount, or Debit/Credit type):', dataRow, {dateVal, amountStr, debitCreditVal});
           continue;
         }
         
@@ -198,7 +204,7 @@ export default function Home() {
         }
 
         const transaction: BankTransaction = {
-          Date: dateVal,
+          Date: dateVal, // dateVal is now correctly typed string | Date | number | null | undefined
           Details: colIndexMap.Details !== undefined ? String(dataRow[colIndexMap.Details] || '') : '',
           Description: colIndexMap.Description !== undefined ? String(dataRow[colIndexMap.Description] || '') : '',
           Amount: amountNum,
@@ -222,15 +228,15 @@ export default function Home() {
         autoDownloadTriggerRef.current = true;
       }
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error processing file:', error);
-      const errorMessage = error.message || 'Error processing file. Please make sure it\'s a valid Excel file with expected columns.';
+      const errorMessage = error instanceof Error ? error.message : 'Error processing file. Please make sure it\'s a valid Excel file with expected columns.';
       alert(errorMessage);
       setConvertedData([]);
     } finally {
       setIsProcessing(false);
     }
-  }, []);
+  }, [convertToYNABFormat]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -301,7 +307,7 @@ export default function Home() {
             Bank Excel to YNAB CSV
           </h1>
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Easily convert your bank's Excelss transaction files into YNAB-ready CSV format.
+            Easily convert your bank&apos;s Excelss transaction files into YNAB-ready CSV format.
           </p>
         </div>
 
@@ -420,11 +426,11 @@ export default function Home() {
                     <div className="p-4 bg-gray-50 rounded-lg">
                         <h4 className="font-medium text-gray-700 mb-1">Bank Excel Columns (Expected)</h4>
                         <ul className="list-disc list-inside text-left space-y-1">
-                            <li>Date (e.g., "2023-05-26" or "26 May 2023")</li>
+                            <li>Date (e.g., &quot;2023-05-26&quot; or &quot;26 May 2023&quot;)</li>
                             <li>Details (Payee name)</li>
                             <li>Description (Transaction memo)</li>
                             <li>Amount (e.g., 100.50)</li>
-                            <li>Debit/Credit (or similar, e.g., "DR", "CR", "Debit", "Credit")</li>
+                            <li>Debit/Credit (or similar, e.g., &quot;DR&quot;, &quot;CR&quot;, &quot;Debit&quot;, &quot;Credit&quot;)</li>
                         </ul>
                     </div>
                     <div className="p-4 bg-gray-50 rounded-lg">
