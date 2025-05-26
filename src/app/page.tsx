@@ -23,6 +23,11 @@ interface YNABTransaction {
   Inflow: string;
 }
 
+interface ColumnMapping {
+  ynabColumn: string;
+  bankColumn: string;
+}
+
 export default function Home() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -31,6 +36,14 @@ export default function Home() {
   const autoDownloadTriggerRef = useRef(false);
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+  const [columnMappings, setColumnMappings] = useState<ColumnMapping[]>([
+    { ynabColumn: 'Date', bankColumn: 'Date' },
+    { ynabColumn: 'Payee', bankColumn: 'Details' },
+    { ynabColumn: 'Memo', bankColumn: 'Description' },
+    { ynabColumn: 'Amount', bankColumn: 'Amount' },
+    { ynabColumn: 'Debit/Credit', bankColumn: 'Debit/Credit' },
+  ]);
 
   const formatDate = (dateInput: string | Date | number | null | undefined): string => {
     if (dateInput === null || dateInput === undefined) return '';
@@ -106,6 +119,16 @@ export default function Home() {
     setShowToast(true);
   };
 
+  const updateColumnMapping = (ynabColumn: string, bankColumn: string) => {
+    setColumnMappings(prev => 
+      prev.map(mapping => 
+        mapping.ynabColumn === ynabColumn 
+          ? { ...mapping, bankColumn } 
+          : mapping
+      )
+    );
+  };
+
   const processFile = useCallback(async (file: File) => {
     setIsProcessing(true);
     setFileName(file.name);
@@ -122,11 +145,11 @@ export default function Home() {
       if (rows.length === 0) throw new Error('Sheet is empty or could not be read.');
 
       const targetHeaders: { key: keyof BankTransaction | 'DebitCredit', variations: string[] }[] = [
-        { key: 'Date', variations: ['Date'] },
-        { key: 'Details', variations: ['Details', 'Transaction Details'] },
-        { key: 'Description', variations: ['Description', 'Memo', 'Narrative'] },
-        { key: 'Amount', variations: ['Amount', 'Amount ', 'Transaction Amount'] }, // Note "Amount " with space
-        { key: 'DebitCredit', variations: ['Debit/Credit', 'Debit Credit', 'Transaction Type', 'Cr/Dr'] },
+        { key: 'Date', variations: [columnMappings.find(m => m.ynabColumn === 'Date')?.bankColumn || 'Date'] },
+        { key: 'Details', variations: [columnMappings.find(m => m.ynabColumn === 'Payee')?.bankColumn || 'Details', 'Transaction Details'] },
+        { key: 'Description', variations: [columnMappings.find(m => m.ynabColumn === 'Memo')?.bankColumn || 'Description', 'Memo', 'Narrative'] },
+        { key: 'Amount', variations: [columnMappings.find(m => m.ynabColumn === 'Amount')?.bankColumn || 'Amount', 'Amount ', 'Transaction Amount'] }, // Note "Amount " with space
+        { key: 'DebitCredit', variations: [columnMappings.find(m => m.ynabColumn === 'Debit/Credit')?.bankColumn || 'Debit/Credit', 'Debit Credit', 'Transaction Type', 'Cr/Dr'] },
         { key: 'Currency', variations: ['Currency', 'Curr'] },
         { key: 'Balance', variations: ['Balance', 'Running Balance'] },
         { key: 'Status', variations: ['Status', 'Transaction Status'] },
@@ -236,7 +259,7 @@ export default function Home() {
     } finally {
       setIsProcessing(false);
     }
-  }, [convertToYNABFormat]);
+  }, [convertToYNABFormat, columnMappings]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -299,16 +322,28 @@ export default function Home() {
   }, [showToast]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex flex-col items-center py-8">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-blue-900 to-purple-900 flex flex-col items-center py-8">
       <div className="container mx-auto px-4 w-full max-w-5xl">
         {/* Header */}
-        <div className="text-center mb-10">
-          <h1 className="text-4xl sm:text-5xl font-bold text-gray-800 mb-3">
+        <div className="text-center mb-10 relative">
+          <h1 className="text-4xl sm:text-5xl font-bold text-white mb-3">
             Bank Excel to YNAB CSV
           </h1>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Easily convert your bank&apos;s Excelss transaction files into YNAB-ready CSV format.
+          <p className="text-lg text-blue-100 max-w-2xl mx-auto">
+            Easily convert your bank&apos;s Excel transaction files into YNAB-ready CSV format.
           </p>
+          
+          {/* Settings Icon */}
+          <button
+            onClick={() => setShowSettings(true)}
+            className="absolute top-0 right-0 p-2 text-blue-200 hover:text-white hover:bg-blue-800 rounded-lg transition-colors duration-200"
+            title="Column Mapping Settings"
+          >
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
         </div>
 
         {/* Upload Area */}
@@ -316,8 +351,8 @@ export default function Home() {
           <div
             className={`border-2 border-dashed rounded-lg p-8 sm:p-12 text-center transition-all duration-300 ease-in-out ${
               isDragOver
-                ? 'border-blue-600 bg-blue-50 ring-4 ring-blue-200'
-                : 'border-gray-300 hover:border-blue-400'
+                ? 'border-indigo-600 bg-indigo-50 ring-4 ring-indigo-200'
+                : 'border-gray-300 hover:border-indigo-400'
             }`}
             onDrop={handleDrop}
             onDragOver={(e) => {
@@ -329,12 +364,12 @@ export default function Home() {
           >
             {isProcessing ? (
               <div className="flex flex-col items-center py-4">
-                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-600 mb-4"></div>
+                <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-indigo-600 mb-4"></div>
                 <p className="text-gray-700 font-medium">Processing: {fileName || 'your file'}...</p>
               </div>
             ) : (
               <>
-                <div className="mb-4 text-blue-500">
+                <div className="mb-4 text-indigo-500">
                   <svg className="mx-auto h-16 w-16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 13h6M12 10v6" /> 
@@ -355,7 +390,7 @@ export default function Home() {
                 />
                 <label
                   htmlFor="file-upload"
-                  className="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-lg shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 cursor-pointer transition-colors duration-200"
+                  className="inline-flex items-center px-6 py-3 border border-transparent text-base font-medium rounded-lg shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 cursor-pointer transition-colors duration-200"
                 >
                   <svg className="w-5 h-5 mr-2 -ml-1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                     <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
@@ -397,8 +432,8 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {convertedData.slice(0, 10).map((transaction, index) => (
-                      <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-blue-50 transition-colors duration-150`}>
+                    {convertedData.slice(0, 3).map((transaction, index) => (
+                      <tr key={index} className={`${index % 2 === 0 ? 'bg-white' : 'bg-gray-50'} hover:bg-indigo-50 transition-colors duration-150`}>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{transaction.Date}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{transaction.Payee}</td>
                         <td className="px-6 py-4 text-sm text-gray-700 max-w-xs truncate" title={transaction.Memo}>{transaction.Memo}</td>
@@ -409,54 +444,70 @@ export default function Home() {
                   </tbody>
                 </table>
               </div>
-              {convertedData.length > 10 && (
+              {convertedData.length > 3 && (
                 <p className="text-center text-sm text-gray-500 mt-4">
-                  Previewing first 10 of {convertedData.length} transactions. Full data in downloaded CSV.
+                  Previewing first 3 of {convertedData.length} transactions. Full data in downloaded CSV.
                 </p>
               )}
             </div>
           </div>
         )}
-        
-        {/* Instructions & Info Section */}
-        <div className="max-w-4xl mx-auto mt-12 text-center">
-            <div className="bg-white rounded-xl shadow-lg p-6 sm:p-8">
-                 <h3 className="text-xl font-semibold text-gray-800 mb-4">Mapping Logic</h3>
-                 <div className="text-sm text-gray-600 space-y-3 md:flex md:space-y-0 md:space-x-6 justify-around">
-                    <div className="p-4 bg-gray-50 rounded-lg">
-                        <h4 className="font-medium text-gray-700 mb-1">Bank Excel Columns (Expected)</h4>
-                        <ul className="list-disc list-inside text-left space-y-1">
-                            <li>Date (e.g., &quot;2023-05-26&quot; or &quot;26 May 2023&quot;)</li>
-                            <li>Details (Payee name)</li>
-                            <li>Description (Transaction memo)</li>
-                            <li>Amount (e.g., 100.50)</li>
-                            <li>Debit/Credit (or similar, e.g., &quot;DR&quot;, &quot;CR&quot;, &quot;Debit&quot;, &quot;Credit&quot;)</li>
-                        </ul>
-                    </div>
-                    <div className="p-4 bg-gray-50 rounded-lg">
-                        <h4 className="font-medium text-gray-700 mb-1">Converted to YNAB CSV Columns</h4>
-                        <ul className="list-disc list-inside text-left space-y-1">
-                            <li>Date (YYYY-MM-DD)</li>
-                            <li>Payee</li>
-                            <li>Memo</li>
-                            <li>Outflow (for debits)</li>
-                            <li>Inflow (for credits)</li>
-                        </ul>
-                    </div>
-                </div>
-                <p className="mt-6 text-xs text-gray-500">
-                    The converter attempts to find these columns automatically. Ensure your Excel file has clear headers.
-                    The app processes data starting from the row after the identified headers.
-                </p>
-            </div>
-        </div>
 
       </div>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-semibold text-gray-800">Column Mapping</h3>
+              <button
+                onClick={() => setShowSettings(false)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            
+            <div className="space-y-4">
+              <p className="text-sm text-gray-600 mb-4">
+                Map your bank&apos;s column names to YNAB format:
+              </p>
+              
+              {columnMappings.map((mapping) => (
+                <div key={mapping.ynabColumn} className="space-y-2">
+                  <label className="block text-sm font-medium text-gray-700">
+                    {mapping.ynabColumn}
+                  </label>
+                  <input
+                    type="text"
+                    value={mapping.bankColumn}
+                    onChange={(e) => updateColumnMapping(mapping.ynabColumn, e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                    placeholder={`Enter your bank's ${mapping.ynabColumn.toLowerCase()} column name`}
+                  />
+                </div>
+              ))}
+              
+              <div className="pt-4">
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors duration-200"
+                >
+                  Save Mapping
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification */}
       {showToast && (
         <div 
-          className="fixed bottom-5 right-5 bg-green-500 text-white py-3 px-6 rounded-lg shadow-lg transition-opacity duration-300 ease-in-out animate-fadeInUp"
+          className="fixed bottom-5 left-1/2 transform -translate-x-1/2 bg-green-500 text-white py-3 px-6 rounded-lg shadow-lg transition-opacity duration-300 ease-in-out animate-fadeInUp"
           role="alert"
         >
           <div className="flex items-center">
