@@ -330,7 +330,7 @@ export default function Home() {
             Bank Excel to YNAB CSV
           </h1>
           <p className="text-lg text-blue-100 max-w-2xl mx-auto">
-            Easily convert your bank&apos;s Excel transaction files into YNAB-ready CSV format.
+            Easily convert your bank&apos;s Excel transaction files into CSV format for YNAB.
           </p>
           
           {/* Settings Icon */}
