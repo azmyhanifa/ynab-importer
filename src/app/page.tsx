@@ -132,6 +132,78 @@ interface ColumnMapping {
   bankColumn: string;
 }
 
+const COLUMN_MAPPINGS: ColumnMapping[] = [
+  { ynabColumn: 'Date', bankColumn: 'Date' },
+  { ynabColumn: 'Payee', bankColumn: 'Details' },
+  { ynabColumn: 'Memo', bankColumn: 'Description' },
+  { ynabColumn: 'Amount', bankColumn: 'Amount' },
+  { ynabColumn: 'Debit/Credit', bankColumn: 'Debit/Credit' },
+];
+
+function formatDate(dateInput: string | Date | number | null | undefined): string {
+  if (dateInput === null || dateInput === undefined) return '';
+  let date: Date;
+
+  if (dateInput instanceof Date) {
+    date = dateInput;
+  } else if (typeof dateInput === 'string') {
+    const dateStr = dateInput.trim();
+    if (!dateStr) return '';
+    date = new Date(dateStr);
+    if (isNaN(date.getTime())) {
+      const parts = dateStr.split(/[\s-/]+/);
+      if (parts.length === 3) {
+        const day = parts[0];
+        const monthStr = parts[1];
+        const year = parts[2];
+        const months: Record<string, string> = {
+          Jan: '01', Feb: '02', Mar: '03', Apr: '04',
+          May: '05', Jun: '06', Jul: '07', Aug: '08',
+          Sep: '09', Oct: '10', Nov: '11', Dec: '12',
+        };
+        const key = monthStr?.charAt(0).toUpperCase() + monthStr?.slice(1).toLowerCase();
+        const monthNum = months[monthStr as string] ?? months[key];
+        if (monthNum && /^\d{1,2}$/.test(day) && /^\d{4}$/.test(year)) {
+          date = new Date(`${year}-${monthNum}-${day.padStart(2, '0')}T00:00:00`);
+        }
+      }
+    }
+  } else if (typeof dateInput === 'number') {
+    if (dateInput > 0 && dateInput < 200000) {
+      const excelEpoch = Date.UTC(1899, 11, 30);
+      date = new Date(excelEpoch + (dateInput - 1) * 24 * 60 * 60 * 1000);
+    } else {
+      date = new Date(dateInput);
+    }
+  } else {
+    return String(dateInput || '');
+  }
+
+  if (!date! || isNaN(date!.getTime())) {
+    console.warn('Could not parse date:', dateInput);
+    return typeof dateInput === 'string' ? dateInput.trim() : String(dateInput);
+  }
+
+  const fYear = date.getFullYear();
+  const fMonth = (date.getMonth() + 1).toString().padStart(2, '0');
+  const fDay = date.getDate().toString().padStart(2, '0');
+  return `${fYear}-${fMonth}-${fDay}`;
+}
+
+function convertToYNABFormat(bankData: BankTransaction[]): YNABTransaction[] {
+  return bankData.map(transaction => {
+    const isCredit = transaction['Debit/Credit']?.toLowerCase().includes('credit');
+    const amount = Math.abs(transaction.Amount || 0).toFixed(2);
+    return {
+      Date: formatDate(transaction.Date),
+      Payee: transaction.Details || '',
+      Memo: transaction.Description || '',
+      Outflow: isCredit ? '' : amount,
+      Inflow: isCredit ? amount : '',
+    };
+  });
+}
+
 export default function Home() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -177,82 +249,6 @@ export default function Home() {
     errors: string[];
   } | null>(null);
 
-  const columnMappings: ColumnMapping[] = [
-    { ynabColumn: 'Date', bankColumn: 'Date' },
-    { ynabColumn: 'Payee', bankColumn: 'Details' },
-    { ynabColumn: 'Memo', bankColumn: 'Description' },
-    { ynabColumn: 'Amount', bankColumn: 'Amount' },
-    { ynabColumn: 'Debit/Credit', bankColumn: 'Debit/Credit' },
-  ];
-
-  const formatDate = (dateInput: string | Date | number | null | undefined): string => {
-    if (dateInput === null || dateInput === undefined) return '';
-    let date: Date;
-
-    if (dateInput instanceof Date) {
-        date = dateInput;
-    } else if (typeof dateInput === 'string') {
-        const dateStr = dateInput.trim();
-        if (!dateStr) return '';
-        date = new Date(dateStr);
-        if (isNaN(date.getTime())) {
-            const parts = dateStr.split(/[\s-/]+/); 
-            if (parts.length === 3) {
-                const day = parts[0];
-                const monthStr = parts[1];
-                const year = parts[2];
-                const months: { [key: string]: string } = {
-                    'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
-                    'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
-                    'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
-                };
-                const monthNum = months[monthStr as keyof typeof months] || months[monthStr?.charAt(0).toUpperCase() + monthStr?.slice(1).toLowerCase() as keyof typeof months];
-                if (monthNum && /^\d{1,2}$/.test(day) && /^\d{4}$/.test(year)) {
-                    const isoStr = `${year}-${monthNum}-${day.padStart(2, '0')}T00:00:00`;
-                    date = new Date(isoStr);
-                }
-            }
-        }
-    } else if (typeof dateInput === 'number') {
-        // Handle Excel serial date numbers (days since 1899-12-30 or 1904-01-01 for Mac)
-        // cellDates: true should ideally handle this, but this is a fallback.
-        if (dateInput > 0 && dateInput < 200000) { // Heuristic for Excel date numbers
-            const excelEpoch = Date.UTC(1899, 11, 30); // Excel's epoch (Windows)
-            // XLSX uses 1899-12-30 as day 0, not 1. So dateInput 1 is 1899-12-31.
-            // JS Date month is 0-indexed. Excel is 1-indexed.
-            date = new Date(excelEpoch + (dateInput -1) * 24 * 60 * 60 * 1000);
-        } else {
-            date = new Date(dateInput); // Assume timestamp in ms if not an Excel serial or already a Date object
-        }
-    } else {
-        return String(dateInput || ''); // Fallback for unknown types
-    }
-
-    if (!date || isNaN(date.getTime())) {
-        console.warn("Could not parse date:", dateInput);
-        return typeof dateInput === 'string' ? dateInput.trim() : String(dateInput);
-    }
-
-    const fYear = date.getFullYear();
-    const fMonth = (date.getMonth() + 1).toString().padStart(2, '0');
-    const fDay = date.getDate().toString().padStart(2, '0');
-    return `${fYear}-${fMonth}-${fDay}`;
-  };
-
-  const convertToYNABFormat = (bankData: BankTransaction[]): YNABTransaction[] => {
-    return bankData.map(transaction => {
-      const isCredit = transaction['Debit/Credit']?.toLowerCase().includes('credit');
-      const amount = Math.abs(transaction.Amount || 0).toFixed(2);
-      
-      return {
-        Date: formatDate(transaction.Date),
-        Payee: transaction.Details || '',
-        Memo: transaction.Description || '',
-        Outflow: isCredit ? '' : amount,
-        Inflow: isCredit ? amount : ''
-      };
-    });
-  };
 
   const displayToast = (message: string) => {
     setToastMessage(message);
@@ -278,11 +274,11 @@ export default function Home() {
       if (rows.length === 0) throw new Error('Sheet is empty or could not be read.');
 
       const targetHeaders: { key: keyof BankTransaction | 'DebitCredit', variations: string[] }[] = [
-        { key: 'Date', variations: [columnMappings.find(m => m.ynabColumn === 'Date')?.bankColumn || 'Date'] },
-        { key: 'Details', variations: [columnMappings.find(m => m.ynabColumn === 'Payee')?.bankColumn || 'Details', 'Transaction Details'] },
-        { key: 'Description', variations: [columnMappings.find(m => m.ynabColumn === 'Memo')?.bankColumn || 'Description', 'Memo', 'Narrative'] },
-        { key: 'Amount', variations: [columnMappings.find(m => m.ynabColumn === 'Amount')?.bankColumn || 'Amount', 'Amount ', 'Transaction Amount'] }, // Note "Amount " with space
-        { key: 'DebitCredit', variations: [columnMappings.find(m => m.ynabColumn === 'Debit/Credit')?.bankColumn || 'Debit/Credit', 'Debit Credit', 'Transaction Type', 'Cr/Dr'] },
+        { key: 'Date', variations: [COLUMN_MAPPINGS.find(m => m.ynabColumn === 'Date')?.bankColumn || 'Date'] },
+        { key: 'Details', variations: [COLUMN_MAPPINGS.find(m => m.ynabColumn === 'Payee')?.bankColumn || 'Details', 'Transaction Details'] },
+        { key: 'Description', variations: [COLUMN_MAPPINGS.find(m => m.ynabColumn === 'Memo')?.bankColumn || 'Description', 'Memo', 'Narrative'] },
+        { key: 'Amount', variations: [COLUMN_MAPPINGS.find(m => m.ynabColumn === 'Amount')?.bankColumn || 'Amount', 'Amount ', 'Transaction Amount'] },
+        { key: 'DebitCredit', variations: [COLUMN_MAPPINGS.find(m => m.ynabColumn === 'Debit/Credit')?.bankColumn || 'Debit/Credit', 'Debit Credit', 'Transaction Type', 'Cr/Dr'] },
         { key: 'Currency', variations: ['Currency', 'Curr'] },
         { key: 'Balance', variations: ['Balance', 'Running Balance'] },
         { key: 'Status', variations: ['Status', 'Transaction Status'] },
@@ -407,7 +403,7 @@ export default function Home() {
     } finally {
       setIsProcessing(false);
     }
-  }, [convertToYNABFormat, columnMappings]);
+  }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -464,7 +460,7 @@ export default function Home() {
     document.body.removeChild(link);
 
     displayToast(`Successfully downloaded ${ynabFileName}`);
-  }, [convertedData, matchResults, fileName]);
+  }, [convertedData, matchResults, overriddenPayees, selectedRows, fileName]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout;
@@ -527,7 +523,6 @@ export default function Home() {
         setYnabConnecting(false);
       }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Re-run merchant matching whenever transactions or payee list changes
@@ -1147,7 +1142,7 @@ export default function Home() {
                             onChange={() => {
                               setSelectedRows(prev => {
                                 const next = new Set(prev);
-                                next.has(index) ? next.delete(index) : next.add(index);
+                                if (next.has(index)) { next.delete(index); } else { next.add(index); }
                                 return next;
                               });
                             }}
