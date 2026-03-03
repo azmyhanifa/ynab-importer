@@ -1,26 +1,48 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8f7f2;
+  --foreground: #2d2b2a;
+  --ynab-navy: #1e1f3b;
+  --ynab-blue: #3b4da0;
+  --ynab-green: #46a32f;
+  --ynab-green-light: #eef6ea;
+  --ynab-purple: #2a2755;
+  --ynab-bg: #f8f7f2;
+  --ynab-border: #e6e2d9;
+  --ynab-text-muted: #8c8780;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --color-ynab-navy: var(--ynab-navy);
+  --color-ynab-blue: var(--ynab-blue);
+  --color-ynab-green: var(--ynab-green);
+  --color-ynab-green-light: var(--ynab-green-light);
+  --color-ynab-purple: var(--ynab-purple);
+  --color-ynab-bg: var(--ynab-bg);
+  --color-ynab-border: var(--ynab-border);
+  --color-ynab-muted: var(--ynab-text-muted);
+  --font-sans: var(--font-figtree);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+body {
+  background: var(--ynab-bg);
+  color: var(--foreground);
+  font-family: var(--font-figtree), Arial, Helvetica, sans-serif;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
+
+.animate-fadeInUp {
+  animation: fadeInUp 0.15s ease-out;
+}
+
+.payee-scroll::-webkit-scrollbar { width: 4px; }
+.payee-scroll::-webkit-scrollbar-track { background: transparent; }
+.payee-scroll::-webkit-scrollbar-thumb { background: #d4cfc6; border-radius: 4px; }
