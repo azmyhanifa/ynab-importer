@@ -32,6 +32,7 @@ body {
   background: var(--ynab-bg);
   color: var(--foreground);
   font-family: var(--font-figtree), Arial, Helvetica, sans-serif;
+  overflow-x: hidden;
 }
 
 @keyframes fadeInUp {
