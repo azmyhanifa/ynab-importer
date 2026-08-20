@@ -4,6 +4,29 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
 import { matchAll, type MatchResult, getConfidenceTier } from './lib/merchantMatcher';
+import {
+  compileTemplate,
+  formatAmount,
+  guessSms,
+  matchTemplate,
+  splitSmsMessages,
+  todayISO,
+  type SmsGuess,
+  type SmsParseFields,
+  type SmsTemplate,
+} from './lib/smsParser';
+import {
+  loadCardAccounts,
+  loadDraft,
+  loadSmsTemplates,
+  saveCardAccounts,
+  saveDraft,
+  saveSmsTemplates,
+} from './lib/storage';
+import SmsPastePanel from './components/SmsPastePanel';
+import SmsConfirmModal from './components/SmsConfirmModal';
+import CardAccountModal from './components/CardAccountModal';
+import type { YNABAccount, YNABTransaction } from './types';
 
 const YNAB_API_BASE = 'https://api.ynab.com/v1';
 const YNAB_API_KEY_STORAGE = 'ynab_api_key';
@@ -85,14 +108,6 @@ interface YNABBudget {
   };
 }
 
-interface YNABAccount {
-  id: string;
-  name: string;
-  type: string;
-  on_budget: boolean;
-  closed: boolean;
-  deleted: boolean;
-}
 
 const ACCOUNT_TYPE_LABELS: Record<string, string> = {
   checking: 'Checking',
@@ -119,13 +134,6 @@ interface BankTransaction {
   Status: string;
 }
 
-interface YNABTransaction {
-  Date: string;
-  Payee: string;
-  Memo: string;
-  Outflow: string;
-  Inflow: string;
-}
 
 interface ColumnMapping {
   ynabColumn: string;
@@ -200,6 +208,7 @@ function convertToYNABFormat(bankData: BankTransaction[]): YNABTransaction[] {
       Memo: transaction.Description || '',
       Outflow: isCredit ? '' : amount,
       Inflow: isCredit ? amount : '',
+      source: 'excel',
     };
   });
 }
@@ -232,6 +241,7 @@ export default function Home() {
   const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const payeeSearchRef = useRef<HTMLInputElement>(null);
   const ynabMenuRef = useRef<HTMLDivElement>(null);
+  const accountsBudgetRef = useRef('');
 
   // Row selection
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
@@ -249,11 +259,209 @@ export default function Home() {
     errors: string[];
   } | null>(null);
 
+  const [smsText, setSmsText] = useState('');
+  const [smsTemplates, setSmsTemplates] = useState<SmsTemplate[]>([]);
+  const [cardAccounts, setCardAccounts] = useState<Record<string, string>>({});
+  const [confirmQueue, setConfirmQueue] = useState<{ raw: string; guess: SmsGuess }[]>([]);
+  const [confirmFields, setConfirmFields] = useState<SmsParseFields | null>(null);
+  const [fixRowIndex, setFixRowIndex] = useState<number | null>(null);
+  const [pendingMapLast4, setPendingMapLast4] = useState<string[]>([]);
+  const [draftReady, setDraftReady] = useState(false);
 
   const displayToast = (message: string) => {
     setToastMessage(message);
     setShowToast(true);
   };
+
+  const upsertTemplates = useCallback((tpl: SmsTemplate) => {
+    setSmsTemplates(prev => {
+      const next = [tpl, ...prev.filter(t => t.pattern !== tpl.pattern)].slice(0, 20);
+      saveSmsTemplates(next);
+      return next;
+    });
+  }, []);
+
+  const rememberCardAccount = useCallback((last4: string, accountId: string) => {
+    setCardAccounts(prev => {
+      const next = { ...prev, [last4]: accountId };
+      saveCardAccounts(next);
+      return next;
+    });
+    setConvertedData(prev =>
+      prev.map(t =>
+        t.source === 'sms' && t.last4 === last4 ? { ...t, accountId } : t,
+      ),
+    );
+  }, []);
+
+  const fieldsToRow = useCallback((fields: SmsParseFields, raw: string): YNABTransaction => {
+    const amount = formatAmount(fields.amount);
+    return {
+      Date: fields.date || todayISO(),
+      Payee: fields.payee,
+      Memo: raw,
+      Outflow: fields.direction === 'outflow' ? amount : '',
+      Inflow: fields.direction === 'inflow' ? amount : '',
+      source: 'sms',
+      last4: fields.last4 || undefined,
+      accountId: fields.last4 ? cardAccounts[fields.last4] : undefined,
+    };
+  }, [cardAccounts]);
+
+  const appendSmsRows = useCallback((rows: YNABTransaction[]) => {
+    if (rows.length === 0) return;
+    const saved = loadSavedMappings();
+    setConvertedData(prev => {
+      const start = prev.length;
+      const extra: Record<number, string> = {};
+      rows.forEach((row, i) => {
+        if (saved[row.Payee]) extra[start + i] = saved[row.Payee];
+      });
+      if (Object.keys(extra).length) {
+        setOverriddenPayees(o => ({ ...o, ...extra }));
+      }
+      setTransactionStatuses(s => [...s, ...rows.map(() => '')]);
+      setSelectedRows(sel => {
+        const next = new Set(sel);
+        rows.forEach((_, i) => next.add(start + i));
+        return next;
+      });
+      return [...prev, ...rows];
+    });
+    setFileName(f => f || 'Pasted SMS');
+    const unmapped = [
+      ...new Set(
+        rows
+          .filter(r => r.last4 && !r.accountId)
+          .map(r => r.last4 as string),
+      ),
+    ];
+    if (unmapped.length) {
+      setPendingMapLast4(prev => [...new Set([...prev, ...unmapped])]);
+    }
+  }, []);
+
+  const queueUnmappedCards = useCallback((rows: YNABTransaction[]) => {
+    const unmapped = [
+      ...new Set(rows.filter(r => r.last4 && !r.accountId).map(r => r.last4 as string)),
+    ];
+    if (unmapped.length) {
+      setPendingMapLast4(prev => [...new Set([...prev, ...unmapped])]);
+    }
+  }, []);
+
+  const handleSmsPaste = useCallback(() => {
+    const messages = splitSmsMessages(smsText);
+    if (messages.length === 0) return;
+
+    const autoRows: YNABTransaction[] = [];
+    const needsConfirm: { raw: string; guess: SmsGuess }[] = [];
+
+    for (const raw of messages) {
+      const matched = matchTemplate(raw, smsTemplates);
+      if (matched) {
+        autoRows.push(fieldsToRow(matched.fields, raw));
+      } else {
+        needsConfirm.push({ raw, guess: guessSms(raw) });
+      }
+    }
+
+    if (autoRows.length) {
+      appendSmsRows(autoRows);
+      displayToast(
+        autoRows.length === 1
+          ? 'Added via saved SMS format'
+          : `Added ${autoRows.length} via saved SMS format`,
+      );
+    }
+
+    setSmsText('');
+    if (needsConfirm.length) {
+      setConfirmQueue(needsConfirm);
+      setConfirmFields(needsConfirm[0].guess.fields);
+      setFixRowIndex(null);
+    }
+  }, [smsText, smsTemplates, fieldsToRow, appendSmsRows]);
+
+  const closeConfirm = () => {
+    setConfirmQueue([]);
+    setConfirmFields(null);
+    setFixRowIndex(null);
+  };
+
+  const advanceConfirmQueue = (rest: { raw: string; guess: SmsGuess }[]) => {
+    if (rest.length === 0) {
+      closeConfirm();
+      return;
+    }
+    setConfirmQueue(rest);
+    setConfirmFields(rest[0].guess.fields);
+  };
+
+  const confirmSmsFormat = () => {
+    if (!confirmFields || confirmQueue.length === 0) return;
+    const current = confirmQueue[0];
+    const tpl = compileTemplate(current.raw, confirmFields);
+    upsertTemplates(tpl);
+
+    if (fixRowIndex !== null) {
+      const row = fieldsToRow(confirmFields, current.raw);
+      setConvertedData(prev => prev.map((t, i) => (i === fixRowIndex ? row : t)));
+      queueUnmappedCards([row]);
+      closeConfirm();
+      displayToast('SMS row updated');
+      return;
+    }
+
+    appendSmsRows([fieldsToRow(confirmFields, current.raw)]);
+    advanceConfirmQueue(confirmQueue.slice(1));
+  };
+
+  const skipSmsConfirm = () => {
+    if (fixRowIndex !== null) {
+      closeConfirm();
+      return;
+    }
+    advanceConfirmQueue(confirmQueue.slice(1));
+  };
+
+  const openFixFormat = (index: number) => {
+    const row = convertedData[index];
+    if (!row?.Memo) return;
+    const guess = guessSms(row.Memo);
+    const fields: SmsParseFields = {
+      ...guess.fields,
+      amount: row.Outflow || row.Inflow || guess.fields.amount,
+      payee: row.Payee || guess.fields.payee,
+      last4: row.last4 || guess.fields.last4,
+      date: row.Date || guess.fields.date,
+      direction: row.Inflow ? 'inflow' : 'outflow',
+    };
+    setFixRowIndex(index);
+    setConfirmQueue([{ raw: row.Memo, guess: { ...guess, fields } }]);
+    setConfirmFields(fields);
+  };
+
+  const fetchYnabAccounts = useCallback(async (budgetId: string, key: string) => {
+    accountsBudgetRef.current = budgetId;
+    setPushAccountsLoading(true);
+    try {
+      const res = await fetch(`${YNAB_API_BASE}/budgets/${budgetId}/accounts`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const accounts: YNABAccount[] = (data.data?.accounts ?? []).filter(
+          (a: YNABAccount) => !a.deleted && !a.closed,
+        );
+        setPushAccounts(accounts);
+      }
+    } catch (err) {
+      console.error('Failed to fetch accounts', err);
+    } finally {
+      setPushAccountsLoading(false);
+    }
+  }, []);
 
   const processFile = useCallback(async (file: File) => {
     setIsProcessing(true);
@@ -442,7 +650,13 @@ export default function Home() {
             : match && match.confidence >= 0.6
               ? match.payee
               : t.Payee;
-        return { ...t, Payee: payee };
+        return {
+          Date: t.Date,
+          Payee: payee,
+          Memo: t.Memo,
+          Outflow: t.Outflow,
+          Inflow: t.Inflow,
+        };
       })
       .filter(Boolean);
 
@@ -471,6 +685,43 @@ export default function Home() {
     }
     return () => clearTimeout(timer);
   }, [showToast]);
+
+  useEffect(() => {
+    setSmsTemplates(loadSmsTemplates());
+    const cards = loadCardAccounts();
+    setCardAccounts(cards);
+    const draft = loadDraft();
+    if (draft) {
+      setConvertedData(
+        draft.transactions.map(t => ({
+          ...t,
+          accountId: t.accountId || (t.last4 ? cards[t.last4] : undefined),
+        })),
+      );
+      setTransactionStatuses(draft.statuses);
+      setSelectedRows(new Set(draft.selected));
+      setOverriddenPayees(draft.overrides);
+      setFileName(draft.fileName);
+    }
+    setDraftReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady) return;
+    saveDraft({
+      transactions: convertedData,
+      statuses: transactionStatuses,
+      selected: [...selectedRows],
+      overrides: overriddenPayees,
+      fileName,
+    });
+  }, [draftReady, convertedData, transactionStatuses, selectedRows, overriddenPayees, fileName]);
+
+  useEffect(() => {
+    if (!pendingMapLast4.length || !ynabConnected || !selectedBudgetId || !ynabApiKey) return;
+    if (accountsBudgetRef.current === selectedBudgetId) return;
+    fetchYnabAccounts(selectedBudgetId, ynabApiKey);
+  }, [pendingMapLast4, ynabConnected, selectedBudgetId, ynabApiKey, fetchYnabAccounts]);
 
   // Auto-connect and restore last budget on mount
   useEffect(() => {
@@ -516,6 +767,7 @@ export default function Home() {
           } finally {
             setYnabPayeesLoading(false);
           }
+          fetchYnabAccounts(targetBudgetId, storedKey);
         }
       } catch (err) {
         console.error('Auto-connect failed', err);
@@ -523,7 +775,7 @@ export default function Home() {
         setYnabConnecting(false);
       }
     })();
-  }, []);
+  }, [fetchYnabAccounts]);
 
   // Re-run merchant matching whenever transactions or payee list changes
   useEffect(() => {
@@ -591,43 +843,37 @@ export default function Home() {
     setSelectedPushAccountId('');
     setForcePush(false);
     setShowPushModal(true);
-    setPushAccountsLoading(true);
-    try {
-      const res = await fetch(`${YNAB_API_BASE}/budgets/${selectedBudgetId}/accounts`, {
-        headers: { Authorization: `Bearer ${ynabApiKey}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const accounts: YNABAccount[] = (data.data?.accounts ?? []).filter(
-          (a: YNABAccount) => !a.deleted && !a.closed,
-        );
-        setPushAccounts(accounts);
-      }
-    } catch (err) {
-      console.error('Failed to fetch accounts', err);
-    } finally {
-      setPushAccountsLoading(false);
+    if (selectedBudgetId && ynabApiKey) {
+      await fetchYnabAccounts(selectedBudgetId, ynabApiKey);
     }
   };
 
   const pushToYNAB = async () => {
-    if (!selectedPushAccountId) return;
-    setIsPushing(true);
+    const exportData: YNABTransaction[] = [];
+    convertedData.forEach((t, i) => {
+      if (!selectedRows.has(i)) return;
+      const override = overriddenPayees[i];
+      const match = matchResults[i];
+      const payee =
+        override !== undefined
+          ? override
+          : match && match.confidence >= 0.6
+            ? match.payee
+            : t.Payee;
+      const accountId = t.accountId || (t.last4 ? cardAccounts[t.last4] : undefined) || selectedPushAccountId || undefined;
+      exportData.push({ ...t, Payee: payee, accountId });
+    });
 
-    const exportData = convertedData
-      .map((t, i) => {
-        if (!selectedRows.has(i)) return null;
-        const override = overriddenPayees[i];
-        const match = matchResults[i];
-        const payee =
-          override !== undefined
-            ? override
-            : match && match.confidence >= 0.6
-              ? match.payee
-              : t.Payee;
-        return { ...t, Payee: payee };
-      })
-      .filter((t): t is YNABTransaction => t !== null);
+    if (exportData.some(t => !t.accountId)) {
+      setPushResult({
+        pushed: 0,
+        duplicates: 0,
+        errors: ['Pick an account for every transaction (card last-4 or the Excel account).'],
+      });
+      return;
+    }
+
+    setIsPushing(true);
 
     // Build YNAB transaction objects, optionally with import_id for duplicate detection
     const importIdCounts: Record<string, number> = {};
@@ -635,10 +881,10 @@ export default function Home() {
       const amount = t.Outflow
         ? -Math.round(parseFloat(t.Outflow) * 1000)
         : Math.round(parseFloat(t.Inflow || '0') * 1000);
-      const key = `${amount}:${t.Date}`;
+      const key = `${amount}:${t.Date}:${t.accountId}`;
       importIdCounts[key] = (importIdCounts[key] || 0) + 1;
       return {
-        account_id: selectedPushAccountId,
+        account_id: t.accountId as string,
         date: t.Date,
         amount,
         payee_id: isInternalPayee(t.Payee) ? (ynabPayeeIdMap[t.Payee] ?? undefined) : undefined,
@@ -740,6 +986,7 @@ export default function Home() {
     } finally {
       setYnabPayeesLoading(false);
     }
+    fetchYnabAccounts(budgetId, ynabApiKey);
   };
 
   // Close YNAB menu on outside click
@@ -799,9 +1046,23 @@ export default function Home() {
 
   const selectedBudget = ynabBudgets.find(b => b.id === selectedBudgetId);
   const allSelected = convertedData.length > 0 && selectedRows.size === convertedData.length;
+  const hasCardColumn = convertedData.some(t => t.last4);
+  const resolvedAccountId = (t: YNABTransaction) =>
+    t.accountId || (t.last4 ? cardAccounts[t.last4] : undefined);
+  const selectedForPush = convertedData.filter((_, i) => selectedRows.has(i));
+  const pushUnmappedLast4 = [
+    ...new Set(
+      selectedForPush.filter(t => t.last4 && !resolvedAccountId(t)).map(t => t.last4 as string),
+    ),
+  ];
+  const pushNeedsDefaultAccount = selectedForPush.some(t => !resolvedAccountId(t) && !t.last4);
+  const canPush =
+    selectedRows.size > 0 &&
+    pushUnmappedLast4.length === 0 &&
+    (!pushNeedsDefaultAccount || !!selectedPushAccountId);
 
   return (
-    <div className="min-h-screen bg-ynab-bg pb-[200px]">
+    <div className="min-h-screen bg-ynab-bg pb-[220px]">
       {/* Top nav bar */}
       <header className="bg-ynab-navy sticky top-0 z-30 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
@@ -952,36 +1213,48 @@ export default function Home() {
       >
         {/* Upload area — only shown when no file loaded */}
         {convertedData.length === 0 && (
-          <div
-            className={`rounded-lg border-2 border-dashed p-12 text-center transition-all duration-200 mb-6 ${
-              isDragOver
-                ? 'border-ynab-green bg-ynab-green-light'
-                : 'border-ynab-border hover:border-ynab-navy/30 bg-white'
-            }`}
-            onDrop={handleDrop}
-            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setIsDragOver(true); }}
-            onDragLeave={() => setIsDragOver(false)}
-          >
-            {isProcessing ? (
-              <div className="flex flex-col items-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-2 border-ynab-navy/20 border-t-ynab-navy mb-3" />
-                <p className="text-sm font-medium text-foreground">Processing {fileName}…</p>
+          <div className="space-y-4 mb-6">
+            <div
+              className={`rounded-lg border-2 border-dashed p-12 text-center transition-all duration-200 ${
+                isDragOver
+                  ? 'border-ynab-green bg-ynab-green-light'
+                  : 'border-ynab-border hover:border-ynab-navy/30 bg-white'
+              }`}
+              onDrop={handleDrop}
+              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setIsDragOver(true); }}
+              onDragLeave={() => setIsDragOver(false)}
+            >
+              {isProcessing ? (
+                <div className="flex flex-col items-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-2 border-ynab-navy/20 border-t-ynab-navy mb-3" />
+                  <p className="text-sm font-medium text-foreground">Processing {fileName}…</p>
+                </div>
+              ) : (
+                <>
+                  <svg className="mx-auto h-8 w-8 text-ynab-navy/25 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                  </svg>
+                  <p className="font-medium text-foreground mb-1">Drop your bank statement here</p>
+                  <p className="text-ynab-muted text-sm mb-5">Excel files (.xlsx, .xls)</p>
+                  <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-upload" />
+                  <label
+                    htmlFor="file-upload"
+                    className="inline-flex items-center px-4 py-2 text-sm font-semibold rounded-md text-white bg-ynab-navy hover:bg-ynab-blue transition-colors cursor-pointer"
+                  >
+                    Choose File
+                  </label>
+                </>
+              )}
+            </div>
+
+            {!isProcessing && (
+              <div className="bg-white rounded-lg border border-ynab-border p-5">
+                <p className="font-medium text-foreground mb-1">Or paste a bank SMS</p>
+                <p className="text-ynab-muted text-sm mb-3">
+                  We’ll guess amount, payee, and card ending — confirm once, then it remembers the format.
+                </p>
+                <SmsPastePanel value={smsText} onChange={setSmsText} onSubmit={handleSmsPaste} />
               </div>
-            ) : (
-              <>
-                <svg className="mx-auto h-8 w-8 text-ynab-navy/25 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                </svg>
-                <p className="font-medium text-foreground mb-1">Drop your bank statement here</p>
-                <p className="text-ynab-muted text-sm mb-5">Excel files (.xlsx, .xls)</p>
-                <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-upload" />
-                <label
-                  htmlFor="file-upload"
-                  className="inline-flex items-center px-4 py-2 text-sm font-semibold rounded-md text-white bg-ynab-navy hover:bg-ynab-blue transition-colors cursor-pointer"
-                >
-                  Choose File
-                </label>
-              </>
             )}
           </div>
         )}
@@ -1023,6 +1296,20 @@ export default function Home() {
                     Change
                   </label>
                   <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-replace" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConvertedData([]);
+                      setTransactionStatuses([]);
+                      setSelectedRows(new Set());
+                      setOverriddenPayees({});
+                      setMatchResults([]);
+                      setFileName('');
+                    }}
+                    className="text-xs text-ynab-muted hover:text-red-600 hover:underline flex-shrink-0"
+                  >
+                    Clear
+                  </button>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-semibold text-foreground">
@@ -1094,6 +1381,9 @@ export default function Home() {
                     </th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
+                    {hasCardColumn && (
+                      <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Card</th>
+                    )}
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Memo</th>
                     <th className="px-3 py-2 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Outflow</th>
                     <th className="px-3 py-2 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Inflow</th>
@@ -1149,7 +1439,17 @@ export default function Home() {
                             className="rounded border-ynab-border text-ynab-green focus:ring-ynab-green accent-ynab-green"
                           />
                         </td>
-                        <td className="px-3 py-2.5 whitespace-nowrap text-ynab-muted text-xs font-mono">{transaction.Date}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">
+                          <input
+                            type="date"
+                            value={transaction.Date}
+                            onChange={e => {
+                              const v = e.target.value;
+                              setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
+                            }}
+                            className="bg-transparent text-ynab-muted text-xs font-mono w-[9.5rem] focus:outline-none focus:text-foreground"
+                          />
+                        </td>
                         <td
                           data-payee-cell
                           onClick={(e) => handlePayeeClick(e, index)}
@@ -1174,7 +1474,30 @@ export default function Home() {
                             )}
                           </div>
                         </td>
-                        <td className="px-3 py-2.5 text-ynab-muted text-xs max-w-[200px] truncate" title={transaction.Memo}>{transaction.Memo}</td>
+                        {hasCardColumn && (
+                          <td className="px-3 py-2.5 whitespace-nowrap">
+                            {transaction.last4 ? (
+                              <span className="text-[11px] font-mono text-ynab-muted">*{transaction.last4}</span>
+                            ) : (
+                              <span className="text-[11px] text-ynab-border">—</span>
+                            )}
+                          </td>
+                        )}
+                        <td className="px-3 py-2.5 text-ynab-muted text-xs max-w-[200px]">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            {transaction.source === 'sms' && (
+                              <button
+                                type="button"
+                                onClick={() => openFixFormat(index)}
+                                className="flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ynab-navy/10 text-ynab-navy hover:bg-ynab-navy/20"
+                                title="Fix SMS format"
+                              >
+                                SMS
+                              </button>
+                            )}
+                            <span className="truncate" title={transaction.Memo}>{transaction.Memo}</span>
+                          </div>
+                        </td>
                         <td className="px-3 py-2.5 whitespace-nowrap text-right text-foreground font-semibold tabular-nums">{transaction.Outflow}</td>
                         <td className="px-3 py-2.5 whitespace-nowrap text-right text-ynab-green font-semibold tabular-nums">{transaction.Inflow}</td>
                         {transactionStatuses.some(s => s) && (
@@ -1208,6 +1531,44 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      {convertedData.length > 0 && !isProcessing && (
+        <div className="fixed bottom-0 inset-x-0 z-20 bg-white/95 backdrop-blur border-t border-ynab-border">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+            <SmsPastePanel
+              compact
+              value={smsText}
+              onChange={setSmsText}
+              onSubmit={handleSmsPaste}
+            />
+          </div>
+        </div>
+      )}
+
+      {confirmQueue.length > 0 && confirmFields && (
+        <SmsConfirmModal
+          guess={confirmQueue[0].guess}
+          fields={confirmFields}
+          remaining={confirmQueue.length}
+          onChange={setConfirmFields}
+          onConfirm={confirmSmsFormat}
+          onSkip={skipSmsConfirm}
+        />
+      )}
+
+      {pendingMapLast4.length > 0 && ynabConnected && confirmQueue.length === 0 && (
+        <CardAccountModal
+          last4={pendingMapLast4[0]}
+          accounts={pushAccounts}
+          loading={pushAccountsLoading}
+          remaining={pendingMapLast4.length}
+          onPick={(id) => {
+            rememberCardAccount(pendingMapLast4[0], id);
+            setPendingMapLast4(prev => prev.slice(1));
+          }}
+          onSkip={() => setPendingMapLast4(prev => prev.slice(1))}
+        />
+      )}
 
       {/* Push to YNAB modal */}
       {showPushModal && (
@@ -1300,7 +1661,45 @@ export default function Home() {
                     );
                   })()}
 
-                  {/* Account selector */}
+                  {/* Card last-4 mapping */}
+                  {pushUnmappedLast4.length > 0 && (
+                    <div className="space-y-3">
+                      {pushUnmappedLast4.map(last4 => (
+                        <div key={last4} className="space-y-2">
+                          <label className="block text-sm font-medium text-gray-700">
+                            Card ending {last4}
+                          </label>
+                          {pushAccountsLoading ? (
+                            <p className="text-sm text-gray-500">Loading accounts…</p>
+                          ) : (
+                            <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
+                              {pushAccounts
+                                .slice()
+                                .sort((a, b) => Number(b.on_budget) - Number(a.on_budget))
+                                .map(account => (
+                                  <button
+                                    key={account.id}
+                                    type="button"
+                                    onClick={() => rememberCardAccount(last4, account.id)}
+                                    className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl border-2 border-ynab-border hover:border-indigo-500 hover:bg-indigo-50 text-left"
+                                  >
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm font-medium text-gray-900 truncate">{account.name}</p>
+                                      <p className="text-xs text-gray-400">
+                                        {ACCOUNT_TYPE_LABELS[account.type] ?? account.type}
+                                      </p>
+                                    </div>
+                                  </button>
+                                ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Account selector for Excel / untagged rows */}
+                  {pushNeedsDefaultAccount && (
                   <div className="space-y-2">
                     <label className="block text-sm font-medium text-gray-700">
                       Which account are these transactions for?
@@ -1343,6 +1742,13 @@ export default function Home() {
                       </div>
                     )}
                   </div>
+                  )}
+
+                  {!pushNeedsDefaultAccount && pushUnmappedLast4.length === 0 && selectedForPush.some(t => t.last4) && (
+                    <p className="text-xs text-gray-500">
+                      SMS rows will go to the accounts linked to each card ending.
+                    </p>
+                  )}
 
                   {/* Duplicate detection toggle */}
                   <label className="flex items-start gap-3 cursor-pointer group">
@@ -1376,7 +1782,7 @@ export default function Home() {
                     </button>
                     <button
                       onClick={pushToYNAB}
-                      disabled={!selectedPushAccountId || isPushing}
+                      disabled={!canPush || isPushing}
                       className="flex-1 px-4 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
                     >
                       {isPushing ? (
