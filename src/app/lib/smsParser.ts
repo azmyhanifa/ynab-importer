@@ -7,7 +7,10 @@ export interface SmsParseFields {
   payee: string;
   direction: SmsDirection;
   date: string;
+  accountId?: string;
 }
+
+export const USD_TO_AED = 3.75;
 
 export type SmsHighlightField = keyof SmsParseFields | 'ignored';
 
@@ -59,6 +62,9 @@ const LAST4_RE = /(?:ending[:\s]+|(?:card|cc)(?:\s+no\.?)?[:\s]+(?:xx+|[*x]{2,})
 const LAST4_FALLBACK_RE = /(?:card|credit\s+card)[^\d]{0,20}(\d{4})/i;
 const OUTFLOW_RE = /\b(purchase|payment|pos|withdrawal|withdrawn|spent|debit|paid|charge[ds]?)\b/i;
 const INFLOW_RE = /\b(refund|credited|received|deposit|salary|reversed|reversal|cashback)\b/i;
+const TRANSFER_RE = /\b(?:has been\s+)?transferred\s+to your account\b|\bhas been transferred\b/i;
+const PAYEE_STOP_RE = /(?:\s+with\s+(?:credit|debit)\s+card)|(?:\s+ending\b)|(?:\s*\.(?:\s|$))|(?:\s+on\s+\d)|(?:\s+Avl\b)|(?:\s+Avail)|(?:\s+Balance\b)|(?:\s+Available\b)|(?:,?\s*\+\d)/i;
+const PHONE_TRAIL_RE = /,?\s*\+?\d[\d\s\-()]{6,}\s*$/;
 const DIRECTION_VERB_GROUP = '(?:Purchase|Payment|Refund|POS|Withdrawal|Withdrawn|Spent|Debit|Paid|Charged|Credited|Received|Deposit)';
 const DATE_ON_RE = /\bon\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i;
 const DATE_TEXT_RE = /\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{2,4})/i;
@@ -74,6 +80,13 @@ export function formatAmount(n: number | string): string {
   const num = typeof n === 'string' ? parseFloat(n.replace(/,/g, '')) : n;
   if (!Number.isFinite(num)) return '0.00';
   return Math.abs(num).toFixed(2);
+}
+
+export function toAed(amount: string, currency?: string): string {
+  const num = parseFloat(String(amount).replace(/,/g, ''));
+  if (!Number.isFinite(num)) return '0.00';
+  if ((currency || 'AED').toUpperCase() === 'USD') return formatAmount(num * USD_TO_AED);
+  return formatAmount(num);
 }
 
 export function splitSmsMessages(text: string): string[] {
@@ -124,10 +137,33 @@ function parseNumericDate(s: string): string | null {
   return `${year}-${month}-${day}`;
 }
 
+export function isTransfer(raw: string): boolean {
+  return TRANSFER_RE.test(raw);
+}
+
 function guessDirection(raw: string): SmsDirection {
+  if (isTransfer(raw)) return 'inflow';
   if (INFLOW_RE.test(raw) && !OUTFLOW_RE.test(raw)) return 'inflow';
   if (INFLOW_RE.test(raw) && /\brefund\b/i.test(raw)) return 'inflow';
   return 'outflow';
+}
+
+function indexOfWhole(raw: string, value: string): number {
+  if (!value) return -1;
+  const hay = raw.toLowerCase();
+  const needle = value.toLowerCase();
+  let idx = hay.indexOf(needle);
+  while (idx !== -1) {
+    const before = idx === 0 || /\W/.test(raw[idx - 1] ?? '');
+    const after = idx + value.length >= raw.length || /\W/.test(raw[idx + value.length] ?? '');
+    if (before && after) return idx;
+    idx = hay.indexOf(needle, idx + 1);
+  }
+  return -1;
+}
+
+export function smsContainsPayee(raw: string, payee: string): boolean {
+  return indexOfWhole(raw, payee) >= 0;
 }
 
 interface MoneyHit {
@@ -168,15 +204,20 @@ function stripCitySuffix(payee: string): string {
   return payee.replace(CITY_TRAIL_RE, '').replace(/[.,;:\s]+$/g, '').trim();
 }
 
+function stripPayeeNoise(payee: string): string {
+  return stripCitySuffix(payee.replace(PHONE_TRAIL_RE, '').replace(/[.,;:\s]+$/g, '').trim());
+}
+
 function findPayee(raw: string): { value: string; start: number; end: number } | null {
-  const marker = /\b(?:at|to)\s+/i.exec(raw);
+  if (isTransfer(raw)) return null;
+  const marker = /\b(?:at|to)(?!\s+your\s+account)\s+/i.exec(raw);
   if (!marker) return null;
   const start = marker.index + marker[0].length;
   const rest = raw.slice(start);
-  const endRel = rest.search(/\s*\.(?:\s|$)|(?:\s+on\s+\d)|(?:\s+Avl\b)|(?:\s+Avail)|(?:\s+Balance\b)|(?:\s+Available\b)/i);
+  const endRel = rest.search(PAYEE_STOP_RE);
   const rawEnd = endRel === -1 ? raw.length : start + endRel;
   const original = raw.slice(start, rawEnd).trim();
-  const value = stripCitySuffix(original);
+  const value = stripPayeeNoise(original);
   if (!value) return null;
   const inRaw = raw.indexOf(value, start);
   const spanStart = inRaw >= 0 ? inRaw : start;
@@ -185,6 +226,7 @@ function findPayee(raw: string): { value: string; start: number; end: number } |
 
 export function guessSms(raw: string): SmsGuess {
   const text = raw.replace(/[\u201C\u201D]/g, '"').trim();
+  const transfer = isTransfer(text);
   const money = findMoneyHits(text);
   const txn = money.find(h => !h.ignored) ?? money[0];
   const last4 = findLast4(text);
@@ -196,7 +238,7 @@ export function guessSms(raw: string): SmsGuess {
     amount: txn ? txn.amount : '',
     currency: txn?.currency || (text.match(/\b(AED|USD|EUR|GBP|SAR)\b/i)?.[1].toUpperCase() ?? 'AED'),
     last4: last4?.value ?? '',
-    payee: payee?.value ?? '',
+    payee: payee?.value ?? (transfer ? 'Transfer' : ''),
     direction,
     date,
   };
@@ -212,8 +254,9 @@ export function guessSms(raw: string): SmsGuess {
   }
 
   const unusedAmounts = money.filter(h => !h.ignored).length > 1;
+  const hasInstrument = !!fields.last4 || transfer;
   const confidence: 'high' | 'weak' =
-    fields.amount && fields.payee && fields.last4 && !unusedAmounts ? 'high' : 'weak';
+    fields.amount && fields.payee && hasInstrument && !unusedAmounts ? 'high' : 'weak';
 
   return { fields, highlights, confidence, raw: text };
 }
@@ -281,8 +324,8 @@ export function findConfirmedSpans(raw: string, fields: SmsParseFields): Span[] 
     }
   }
 
-  if (fields.payee) {
-    const idx = raw.toLowerCase().indexOf(fields.payee.toLowerCase());
+  if (fields.payee && !(fields.payee.toLowerCase() === 'transfer' && isTransfer(raw))) {
+    const idx = indexOfWhole(raw, fields.payee);
     if (idx >= 0) {
       spans.push({ field: 'payee', start: idx, end: idx + fields.payee.length });
     } else {
@@ -356,6 +399,12 @@ export function compileTemplate(raw: string, fields: SmsParseFields): SmsTemplat
         cursor = span.end + city[0].length;
         continue;
       }
+      const phone = afterPayee.match(/^,?\s*\+?\d[\d\s\-()]{6,}/);
+      if (phone) {
+        pattern += '(?:,?\\s*\\+?\\d[\\d\\s\\-()]*)?';
+        cursor = span.end + phone[0].length;
+        continue;
+      }
     } else {
       pattern += fieldPattern(span.field);
     }
@@ -406,7 +455,8 @@ export function matchTemplate(raw: string, templates: SmsTemplate[]): TemplateMa
     if (!m?.groups) continue;
     const amount = formatAmount(m.groups.amount || '');
     if (!amount || amount === '0.00' && !m.groups.amount) continue;
-    const payee = stripCitySuffix((m.groups.payee || '').trim());
+    const transfer = isTransfer(text);
+    const payee = stripPayeeNoise((m.groups.payee || '').trim()) || (transfer ? 'Transfer' : '');
     const fields: SmsParseFields = {
       amount,
       currency: (m.groups.currency || 'AED').toUpperCase(),
@@ -425,5 +475,9 @@ export function matchTemplate(raw: string, templates: SmsTemplate[]): TemplateMa
 }
 
 export function guessNeedsConfirm(guess: SmsGuess): boolean {
-  return guess.confidence === 'weak' || !guess.fields.amount || !guess.fields.payee;
+  return (
+    guess.confidence === 'weak' ||
+    !guess.fields.amount ||
+    (!guess.fields.payee && !isTransfer(guess.raw))
+  );
 }
