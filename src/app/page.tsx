@@ -3,13 +3,14 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import Papa from 'papaparse';
-import { matchAll, type MatchResult, getConfidenceTier } from './lib/merchantMatcher';
+import { matchAll, findBestMatch, type MatchResult, getConfidenceTier } from './lib/merchantMatcher';
 import {
   compileTemplate,
-  formatAmount,
   guessSms,
   matchTemplate,
+  smsContainsPayee,
   splitSmsMessages,
+  toAed,
   todayISO,
   type SmsGuess,
   type SmsParseFields,
@@ -23,7 +24,7 @@ import {
   saveDraft,
   saveSmsTemplates,
 } from './lib/storage';
-import SmsPastePanel from './components/SmsPastePanel';
+import ClipboardPasteButton from './components/SmsPastePanel';
 import SmsConfirmModal from './components/SmsConfirmModal';
 import CardAccountModal from './components/CardAccountModal';
 import type { YNABAccount, YNABTransaction } from './types';
@@ -43,6 +44,48 @@ function loadSavedMappings(): Record<string, string> {
 
 function saveMappings(mappings: Record<string, string>) {
   localStorage.setItem(YNAB_PAYEE_MAPPINGS_STORAGE, JSON.stringify(mappings));
+}
+
+function persistPayeeMapping(bankPayee: string, ynabPayee: string) {
+  if (!bankPayee || !ynabPayee || bankPayee === ynabPayee) return;
+  const saved = loadSavedMappings();
+  saved[bankPayee] = ynabPayee;
+  saveMappings(saved);
+}
+
+function fieldsForConfirm(
+  fields: SmsParseFields,
+  ynabPayees: string[] = [],
+  cardMap: Record<string, string> = {},
+): SmsParseFields {
+  const saved = loadSavedMappings();
+  let payee = fields.payee;
+  if (payee && saved[payee]) {
+    payee = saved[payee];
+  } else if (payee && ynabPayees.length) {
+    const match = findBestMatch(payee, ynabPayees);
+    if (match.confidence >= 0.6) payee = match.payee;
+  }
+  return {
+    ...fields,
+    amount: toAed(fields.amount, fields.currency),
+    currency: 'AED',
+    payee,
+    accountId: fields.accountId || (fields.last4 ? cardMap[fields.last4] : '') || '',
+  };
+}
+
+function ingestToastMessage(added: number, pending: number): string | null {
+  if (added && pending) {
+    return `Added ${added} from clipboard · ${pending} need${pending === 1 ? 's' : ''} format confirm`;
+  }
+  if (added) {
+    return added === 1 ? 'Added from clipboard' : `Added ${added} from clipboard`;
+  }
+  if (pending) {
+    return pending === 1 ? '1 needs format confirm' : `${pending} need format confirm`;
+  }
+  return null;
 }
 
 const YNAB_INTERNAL_PAYEE_PREFIXES = [
@@ -259,7 +302,6 @@ export default function Home() {
     errors: string[];
   } | null>(null);
 
-  const [smsText, setSmsText] = useState('');
   const [smsTemplates, setSmsTemplates] = useState<SmsTemplate[]>([]);
   const [cardAccounts, setCardAccounts] = useState<Record<string, string>>({});
   const [confirmQueue, setConfirmQueue] = useState<{ raw: string; guess: SmsGuess }[]>([]);
@@ -295,7 +337,7 @@ export default function Home() {
   }, []);
 
   const fieldsToRow = useCallback((fields: SmsParseFields, raw: string): YNABTransaction => {
-    const amount = formatAmount(fields.amount);
+    const amount = toAed(fields.amount, fields.currency);
     return {
       Date: fields.date || todayISO(),
       Payee: fields.payee,
@@ -304,7 +346,7 @@ export default function Home() {
       Inflow: fields.direction === 'inflow' ? amount : '',
       source: 'sms',
       last4: fields.last4 || undefined,
-      accountId: fields.last4 ? cardAccounts[fields.last4] : undefined,
+      accountId: fields.accountId || (fields.last4 ? cardAccounts[fields.last4] : undefined) || undefined,
     };
   }, [cardAccounts]);
 
@@ -350,8 +392,8 @@ export default function Home() {
     }
   }, []);
 
-  const handleSmsPaste = useCallback(() => {
-    const messages = splitSmsMessages(smsText);
+  const ingestSmsText = useCallback((text: string) => {
+    const messages = splitSmsMessages(text);
     if (messages.length === 0) return;
 
     const autoRows: YNABTransaction[] = [];
@@ -368,20 +410,17 @@ export default function Home() {
 
     if (autoRows.length) {
       appendSmsRows(autoRows);
-      displayToast(
-        autoRows.length === 1
-          ? 'Added via saved SMS format'
-          : `Added ${autoRows.length} via saved SMS format`,
-      );
     }
 
-    setSmsText('');
     if (needsConfirm.length) {
       setConfirmQueue(needsConfirm);
-      setConfirmFields(needsConfirm[0].guess.fields);
+      setConfirmFields(fieldsForConfirm(needsConfirm[0].guess.fields, ynabPayees, cardAccounts));
       setFixRowIndex(null);
     }
-  }, [smsText, smsTemplates, fieldsToRow, appendSmsRows]);
+
+    const toast = ingestToastMessage(autoRows.length, needsConfirm.length);
+    if (toast) displayToast(toast);
+  }, [smsTemplates, fieldsToRow, appendSmsRows, ynabPayees, cardAccounts]);
 
   const closeConfirm = () => {
     setConfirmQueue([]);
@@ -395,26 +434,77 @@ export default function Home() {
       return;
     }
     setConfirmQueue(rest);
-    setConfirmFields(rest[0].guess.fields);
+    setConfirmFields(fieldsForConfirm(rest[0].guess.fields, ynabPayees, cardAccounts));
   };
 
   const confirmSmsFormat = () => {
     if (!confirmFields || confirmQueue.length === 0) return;
     const current = confirmQueue[0];
-    const tpl = compileTemplate(current.raw, confirmFields);
+    const extractedPayee = current.guess.fields.payee;
+    const mappedPayee = confirmFields.payee;
+    persistPayeeMapping(extractedPayee, mappedPayee);
+
+    if (confirmFields.last4 && confirmFields.accountId) {
+      rememberCardAccount(confirmFields.last4, confirmFields.accountId);
+    }
+
+    const tplPayee = smsContainsPayee(current.raw, mappedPayee)
+      ? mappedPayee
+      : extractedPayee || mappedPayee;
+    const tpl = compileTemplate(current.raw, {
+      ...confirmFields,
+      amount: current.guess.fields.amount,
+      currency: current.guess.fields.currency || confirmFields.currency,
+      payee: tplPayee,
+    });
+    const nextTemplates = [tpl, ...smsTemplates.filter(t => t.pattern !== tpl.pattern)].slice(0, 20);
     upsertTemplates(tpl);
 
+    const attachAccount = (fields: SmsParseFields): SmsParseFields => ({
+      ...fields,
+      accountId:
+        (fields.last4 && fields.last4 === confirmFields.last4 && confirmFields.accountId)
+          ? confirmFields.accountId
+          : fields.accountId || (fields.last4 ? cardAccounts[fields.last4] : undefined),
+    });
+
+    const rowFields: SmsParseFields = attachAccount({
+      ...confirmFields,
+      payee: extractedPayee || mappedPayee,
+    });
+
     if (fixRowIndex !== null) {
-      const row = fieldsToRow(confirmFields, current.raw);
+      const row = fieldsToRow(rowFields, current.raw);
       setConvertedData(prev => prev.map((t, i) => (i === fixRowIndex ? row : t)));
+      if (extractedPayee && mappedPayee && extractedPayee !== mappedPayee) {
+        setOverriddenPayees(prev => ({ ...prev, [fixRowIndex]: mappedPayee }));
+      }
       queueUnmappedCards([row]);
       closeConfirm();
       displayToast('SMS row updated');
       return;
     }
 
-    appendSmsRows([fieldsToRow(confirmFields, current.raw)]);
-    advanceConfirmQueue(confirmQueue.slice(1));
+    appendSmsRows([fieldsToRow(rowFields, current.raw)]);
+
+    const rest = confirmQueue.slice(1);
+    const autoRows: YNABTransaction[] = [];
+    const stillNeed: { raw: string; guess: SmsGuess }[] = [];
+    for (const item of rest) {
+      const matched = matchTemplate(item.raw, nextTemplates);
+      if (matched) {
+        autoRows.push(fieldsToRow(attachAccount(matched.fields), item.raw));
+      } else {
+        stillNeed.push(item);
+      }
+    }
+    if (autoRows.length) {
+      appendSmsRows(autoRows);
+    }
+    advanceConfirmQueue(stillNeed);
+
+    const toast = ingestToastMessage(1 + autoRows.length, stillNeed.length);
+    if (toast) displayToast(toast);
   };
 
   const skipSmsConfirm = () => {
@@ -431,15 +521,17 @@ export default function Home() {
     const guess = guessSms(row.Memo);
     const fields: SmsParseFields = {
       ...guess.fields,
-      amount: row.Outflow || row.Inflow || guess.fields.amount,
+      amount: row.Outflow || row.Inflow || toAed(guess.fields.amount, guess.fields.currency),
+      currency: 'AED',
       payee: row.Payee || guess.fields.payee,
       last4: row.last4 || guess.fields.last4,
       date: row.Date || guess.fields.date,
       direction: row.Inflow ? 'inflow' : 'outflow',
+      accountId: row.accountId || '',
     };
     setFixRowIndex(index);
-    setConfirmQueue([{ raw: row.Memo, guess: { ...guess, fields } }]);
-    setConfirmFields(fields);
+    setConfirmQueue([{ raw: row.Memo, guess }]);
+    setConfirmFields(fieldsForConfirm(fields, ynabPayees, cardAccounts));
   };
 
   const fetchYnabAccounts = useCallback(async (budgetId: string, key: string) => {
@@ -718,10 +810,10 @@ export default function Home() {
   }, [draftReady, convertedData, transactionStatuses, selectedRows, overriddenPayees, fileName]);
 
   useEffect(() => {
-    if (!pendingMapLast4.length || !ynabConnected || !selectedBudgetId || !ynabApiKey) return;
-    if (accountsBudgetRef.current === selectedBudgetId) return;
+    if (!confirmQueue.length || !ynabConnected || !selectedBudgetId || !ynabApiKey) return;
+    if (pushAccounts.length > 0) return;
     fetchYnabAccounts(selectedBudgetId, ynabApiKey);
-  }, [pendingMapLast4, ynabConnected, selectedBudgetId, ynabApiKey, fetchYnabAccounts]);
+  }, [confirmQueue.length, ynabConnected, selectedBudgetId, ynabApiKey, fetchYnabAccounts, pushAccounts.length]);
 
   // Auto-connect and restore last budget on mount
   useEffect(() => {
@@ -1017,7 +1109,10 @@ export default function Home() {
         closePayeeDropdown();
       }
     };
-    const handleScroll = () => closePayeeDropdown();
+    const handleScroll = (e: Event) => {
+      if ((e.target as Element | null)?.closest?.('[data-payee-dropdown]')) return;
+      closePayeeDropdown();
+    };
     document.addEventListener('mousedown', handleClickOutside);
     window.addEventListener('scroll', handleScroll, true);
     return () => {
@@ -1028,18 +1123,22 @@ export default function Home() {
 
   const filteredPayees = useMemo(() => {
     const q = payeeSearch.trim().toLowerCase();
-    if (!q) return ynabPayees.slice(0, 10);
-    return ynabPayees.filter(p => p.toLowerCase().includes(q)).slice(0, 10);
+    if (!q) return ynabPayees.slice(0, 20);
+    return ynabPayees.filter(p => p.toLowerCase().includes(q)).slice(0, 30);
   }, [payeeSearch, ynabPayees]);
 
-  const handlePayeeClick = (e: React.MouseEvent<HTMLTableCellElement>, index: number) => {
+  const handlePayeeClick = (e: React.MouseEvent<HTMLElement>, index: number) => {
     if (ynabPayees.length === 0) return;
-    const rect = e.currentTarget.getBoundingClientRect();
     setEditingPayeeIndex(index);
     setPayeeSearch('');
+    if (window.innerWidth < 768) {
+      setDropdownPos(null);
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
     setDropdownPos({
       top: rect.bottom + 4,
-      left: rect.left,
+      left: Math.min(rect.left, window.innerWidth - 300),
       width: Math.max(rect.width, 280),
     });
   };
@@ -1062,25 +1161,25 @@ export default function Home() {
     (!pushNeedsDefaultAccount || !!selectedPushAccountId);
 
   return (
-    <div className="min-h-screen bg-ynab-bg pb-[220px]">
+    <div className="min-h-screen bg-ynab-bg">
       {/* Top nav bar */}
       <header className="bg-ynab-navy sticky top-0 z-30 shadow-sm">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <svg className="w-8 h-8 text-white" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+        <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-14 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <svg className="w-7 h-7 sm:w-8 sm:h-8 text-white flex-shrink-0" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
               <path fillRule="evenodd" d="M12.965 7.137s.087.042.053.094L9.437 12.73a.46.46 0 0 0-.064.207v2.951c0 .06-.053.113-.114.113H6.741a.116.116 0 0 1-.114-.113v-2.95a.45.45 0 0 0-.064-.208L2.97 7.231c-.033-.052-.015-.094.05-.094h2.94c.061 0 .14.045.17.098l1.815 3.073c.034.052.083.052.117 0l1.804-3.073a.23.23 0 0 1 .173-.098zm-1.392 3.619a.26.26 0 0 1 .132-.027c1.297-.003 1.082 1.243 1.026 1.695-.442-.11-1.69-.343-1.23-1.555a.3.3 0 0 1 .072-.113m-7.278-.027c.068 0 .11.012.132.027.019.015.045.06.068.113.46 1.212-.788 1.445-1.23 1.555-.052-.452-.267-1.698 1.03-1.695m7.968-1.091q.004-.069.11-.192c1.387-1.615 2.575.06 3.035.636-.6.425-2.206 1.705-3.092-.23a.5.5 0 0 1-.053-.214m-8.522-.004a.5.5 0 0 1-.053.214c-.886 1.936-2.493.66-3.092.23.456-.572 1.644-2.247 3.035-.636a.5.5 0 0 1 .11.192m9.804-1.818a.35.35 0 0 1 .053-.155c.773-1.37 1.96-.395 2.402-.064-.377.4-1.373 1.57-2.376.362a.4.4 0 0 1-.079-.143m-11.09-.004a.4.4 0 0 1-.08.143C1.374 9.167.378 7.996 0 7.59c.441-.328 1.629-1.303 2.402.067q.061.109.053.155m10.027-1.664a.46.46 0 0 1-.023-.219c.155-2.12 2.108-1.48 2.813-1.29-.226.696-.754 2.68-2.62 1.648a.5.5 0 0 1-.17-.14m-8.964.004c-.019.037-.09.086-.17.139C1.483 7.319.955 5.338.725 4.64c.709-.191 2.659-.831 2.817 1.292a.5.5 0 0 1-.023.219m8.768-1.97c-.068-.003-.132-.01-.159-.03-.022-.015-.053-.06-.083-.139-.558-1.468.954-1.75 1.49-1.882.064.546.324 2.06-1.248 2.052m-8.413-.026a.5.5 0 0 1-.159.03c-1.576.008-1.312-1.506-1.248-2.048.536.128 2.044.41 1.49 1.883q-.042.106-.083.135m4.121-1.23a.6.6 0 0 1-.188-.076C6.15 1.792 7.53.49 7.994 0c.468.49 1.848 1.788.189 2.85a.4.4 0 0 1-.189.075m2.165.786a.5.5 0 0 1-.181.008c-.03-.012-.076-.053-.128-.125-1.003-1.45.565-2.164 1.112-2.45.219.575.909 2.15-.803 2.567m-4.137.008c-.034.015-.105.007-.18-.008-1.713-.418-1.019-1.992-.804-2.571.547.286 2.115 1.001 1.112 2.45q-.075.113-.128.129m1.829 2.063c-1.297-.889-.219-1.984.147-2.395.366.41 1.444 1.506.147 2.395a.3.3 0 0 1-.147.064.4.4 0 0 1-.147-.064m2.09.933a.6.6 0 0 1-.22-.045c-.037-.023-.083-.083-.12-.18-.856-1.95 1.169-2.293 1.885-2.455.125.719.585 2.722-1.546 2.68m-1.947 1.97a.4.4 0 0 1-.147-.065c-1.297-.892-.215-1.984.147-2.394.366.41 1.445 1.502.147 2.394a.3.3 0 0 1-.147.064M6.282 6.67a.6.6 0 0 1-.218.045c-2.13.042-1.67-1.957-1.543-2.68.717.162 2.742.504 1.886 2.454a.46.46 0 0 1-.125.181"/>
             </svg>
-            <h1 className="text-white uppercase" style={{ fontWeight: 900, fontSize: 20, letterSpacing: 0 }}>YNAB Importer</h1>
+            <h1 className="text-white uppercase hidden sm:block" style={{ fontWeight: 900, fontSize: 20, letterSpacing: 0 }}>YNAB Importer</h1>
           </div>
 
           {/* YNAB connection dropdown */}
           <div className="relative" ref={ynabMenuRef}>
             <button
               onClick={() => setShowYnabMenu(v => !v)}
-              className="flex items-center gap-2.5 px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors"
+              className="flex items-center gap-2 px-2 sm:px-3 py-1.5 rounded-lg hover:bg-white/10 transition-colors min-w-0"
             >
-              <div className="text-right">
-                <span className="block text-white font-semibold text-sm max-w-[180px] truncate leading-tight">
+              <div className="text-right min-w-0">
+                <span className="block text-white font-semibold text-sm max-w-[42vw] sm:max-w-[180px] truncate leading-tight">
                   {ynabConnecting
                     ? 'Connecting…'
                     : ynabConnected
@@ -1100,7 +1199,7 @@ export default function Home() {
             </button>
 
             {showYnabMenu && (
-              <div className="absolute right-0 mt-2 w-80 bg-ynab-purple rounded-xl shadow-2xl border border-white/10 overflow-hidden animate-fadeInUp">
+              <div className="absolute right-0 mt-2 w-[min(20rem,calc(100vw-1.5rem))] bg-ynab-purple rounded-xl shadow-2xl border border-white/10 overflow-hidden animate-fadeInUp">
                 {!ynabConnected ? (
                   <div className="p-4 space-y-3">
                     <p className="text-white/70 text-xs">
@@ -1206,16 +1305,16 @@ export default function Home() {
       </header>
 
       <main
-        className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8"
+        className="max-w-5xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8"
         onDrop={convertedData.length > 0 ? handleDrop : undefined}
         onDragOver={convertedData.length > 0 ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setIsDragOver(true); } : undefined}
         onDragLeave={convertedData.length > 0 ? () => setIsDragOver(false) : undefined}
       >
         {/* Upload area — only shown when no file loaded */}
         {convertedData.length === 0 && (
-          <div className="space-y-4 mb-6">
+          <div className="mb-6">
             <div
-              className={`rounded-lg border-2 border-dashed p-12 text-center transition-all duration-200 ${
+              className={`rounded-lg border-2 border-dashed p-8 sm:p-12 text-center transition-all duration-200 ${
                 isDragOver
                   ? 'border-ynab-green bg-ynab-green-light'
                   : 'border-ynab-border hover:border-ynab-navy/30 bg-white'
@@ -1235,27 +1334,20 @@ export default function Home() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                   </svg>
                   <p className="font-medium text-foreground mb-1">Drop your bank statement here</p>
-                  <p className="text-ynab-muted text-sm mb-5">Excel files (.xlsx, .xls)</p>
-                  <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-upload" />
-                  <label
-                    htmlFor="file-upload"
-                    className="inline-flex items-center px-4 py-2 text-sm font-semibold rounded-md text-white bg-ynab-navy hover:bg-ynab-blue transition-colors cursor-pointer"
-                  >
-                    Choose File
-                  </label>
+                  <p className="text-ynab-muted text-sm mb-5">Excel files (.xlsx, .xls) — or paste a bank SMS</p>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-upload" />
+                    <label
+                      htmlFor="file-upload"
+                      className="inline-flex items-center px-4 py-2 text-sm font-semibold rounded-md text-white bg-ynab-navy hover:bg-ynab-blue transition-colors cursor-pointer"
+                    >
+                      Choose File
+                    </label>
+                    <ClipboardPasteButton onPasteText={ingestSmsText} disabled={isProcessing} />
+                  </div>
                 </>
               )}
             </div>
-
-            {!isProcessing && (
-              <div className="bg-white rounded-lg border border-ynab-border p-5">
-                <p className="font-medium text-foreground mb-1">Or paste a bank SMS</p>
-                <p className="text-ynab-muted text-sm mb-3">
-                  We’ll guess amount, payee, and card ending — confirm once, then it remembers the format.
-                </p>
-                <SmsPastePanel value={smsText} onChange={setSmsText} onSubmit={handleSmsPaste} />
-              </div>
-            )}
           </div>
         )}
 
@@ -1284,7 +1376,7 @@ export default function Home() {
             )}
 
             {/* Table toolbar */}
-            <div className="px-4 py-3 border-b border-ynab-border flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="px-3 sm:px-4 py-3 border-b border-ynab-border flex flex-col gap-3">
               <div className="min-w-0">
                 {/* File info */}
                 <div className="flex items-center gap-2 mb-1">
@@ -1311,13 +1403,10 @@ export default function Home() {
                     Clear
                   </button>
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="text-sm font-semibold text-foreground">
-                    {selectedRows.size} <span className="font-normal text-ynab-muted">of {convertedData.length} transactions</span>
+                    {selectedRows.size} <span className="font-normal text-ynab-muted">of {convertedData.length}</span>
                   </span>
-                  {matchResults.length > 0 && (
-                    <span className="text-ynab-border">·</span>
-                  )}
                   {matchResults.length > 0 && (() => {
                     const high = matchResults.filter(r => getConfidenceTier(r.confidence) === 'high').length;
                     const medium = matchResults.filter(r => getConfidenceTier(r.confidence) === 'medium').length;
@@ -1338,35 +1427,141 @@ export default function Home() {
                   })()}
                 </div>
               </div>
-              <div className="flex gap-2 flex-shrink-0">
+              <div className={`grid gap-2 sm:flex sm:flex-wrap ${ynabConnected && selectedBudgetId ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                <ClipboardPasteButton compact onPasteText={ingestSmsText} className="w-full sm:w-auto" />
                 <button
                   onClick={downloadCSV}
                   disabled={selectedRows.size === 0}
-                  className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-md border border-ynab-border text-foreground hover:bg-ynab-bg disabled:opacity-40 transition-colors"
+                  className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-xs font-semibold rounded-md border border-ynab-border text-foreground hover:bg-ynab-bg disabled:opacity-40 transition-colors whitespace-nowrap min-h-[44px] sm:min-h-0"
                 >
                   <svg className="w-3.5 h-3.5 mr-1.5 text-ynab-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                   </svg>
-                  Download CSV
+                  <span className="sm:hidden">CSV</span>
+                  <span className="hidden sm:inline">Download CSV</span>
                 </button>
                 {ynabConnected && selectedBudgetId && (
                   <button
                     onClick={openPushModal}
                     disabled={selectedRows.size === 0}
-                    className="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-md text-white bg-ynab-green hover:brightness-110 disabled:opacity-40 transition-all"
+                    className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-xs font-semibold rounded-md text-white bg-ynab-green hover:brightness-110 disabled:opacity-40 transition-all whitespace-nowrap min-h-[44px] sm:min-h-0"
                   >
                     <svg className="w-3.5 h-3.5 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                     </svg>
-                    Push to YNAB
+                    <span className="sm:hidden">Push</span>
+                    <span className="hidden sm:inline">Push to YNAB</span>
                   </button>
                 )}
               </div>
             </div>
 
-            {/* Table */}
+            {/* Mobile cards */}
+            <div className="md:hidden divide-y divide-ynab-border/60">
+              {convertedData.map((transaction, index) => {
+                const override = overriddenPayees[index];
+                const match = matchResults[index];
+                const isOverridden = override !== undefined;
+                const isMatched = !isOverridden && match && match.confidence >= 0.6;
+                const displayPayee = isOverridden
+                  ? override
+                  : isMatched ? match.payee : transaction.Payee;
+                const tier = match ? getConfidenceTier(match.confidence) : 'none';
+                const isRowSelected = selectedRows.has(index);
+                const dotColor = isOverridden
+                  ? 'bg-ynab-blue'
+                  : tier === 'high' ? 'bg-ynab-green' : tier === 'medium' ? 'bg-amber-400' : 'bg-ynab-border';
+                const tooltipText = isOverridden
+                  ? `Manually set · original: "${transaction.Payee}"`
+                  : tier === 'none' || !match
+                    ? 'No match — tap to set'
+                    : `${tier === 'high' ? 'Matched' : 'Possible'}: "${match.payee}"`;
+                const isEditable = ynabPayees.length > 0;
+                const amount = transaction.Outflow || transaction.Inflow;
+                const isInflow = !!transaction.Inflow;
+                const accountName = resolvedAccountId(transaction)
+                  ? pushAccounts.find(a => a.id === resolvedAccountId(transaction))?.name
+                  : undefined;
 
-            <div className="overflow-x-auto relative">
+                return (
+                  <div
+                    key={index}
+                    className={`px-3 py-3 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/30 opacity-60'}`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={isRowSelected}
+                        onChange={() => {
+                          setSelectedRows(prev => {
+                            const next = new Set(prev);
+                            if (next.has(index)) { next.delete(index); } else { next.add(index); }
+                            return next;
+                          });
+                        }}
+                        className="mt-1.5 w-5 h-5 rounded border-ynab-border text-ynab-green accent-ynab-green flex-shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start justify-between gap-3">
+                          <button
+                            type="button"
+                            data-payee-cell
+                            onClick={e => handlePayeeClick(e, index)}
+                            disabled={!isEditable}
+                            className="min-w-0 text-left"
+                          >
+                            <div className="flex items-center gap-2">
+                              {matchResults.length > 0 && (
+                                <span title={tooltipText} className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
+                              )}
+                              <span className={`font-semibold truncate ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
+                                {displayPayee}
+                              </span>
+                            </div>
+                            {isMatched && match.payee !== transaction.Payee && (
+                              <p className="text-[11px] text-ynab-muted truncate mt-0.5">← {transaction.Payee}</p>
+                            )}
+                          </button>
+                          <span className={`flex-shrink-0 font-semibold tabular-nums ${isInflow ? 'text-ynab-green' : 'text-foreground'}`}>
+                            {isInflow ? '+' : '−'}{amount}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-ynab-muted">
+                          <input
+                            type="date"
+                            value={transaction.Date}
+                            onChange={e => {
+                              const v = e.target.value;
+                              setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
+                            }}
+                            className="bg-transparent text-[12px] text-ynab-muted font-mono w-[9.6rem] focus:outline-none"
+                          />
+                          {transaction.last4 && <span className="font-mono">*{transaction.last4}</span>}
+                          {accountName && <span className="truncate max-w-[140px]">{accountName}</span>}
+                          {transaction.source === 'sms' && (
+                            <button
+                              type="button"
+                              onClick={() => openFixFormat(index)}
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ynab-navy/10 text-ynab-navy"
+                            >
+                              SMS
+                            </button>
+                          )}
+                          {transactionStatuses[index] && (
+                            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
+                              {getStatusBadge(transactionStatuses[index]).label}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop table */}
+            <div className="hidden md:block overflow-x-auto relative">
               <table className="min-w-full text-sm">
                 <thead>
                   <tr className="bg-ynab-bg border-b border-ynab-border">
@@ -1532,24 +1727,16 @@ export default function Home() {
         )}
       </main>
 
-      {convertedData.length > 0 && !isProcessing && (
-        <div className="fixed bottom-0 inset-x-0 z-20 bg-white/95 backdrop-blur border-t border-ynab-border">
-          <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
-            <SmsPastePanel
-              compact
-              value={smsText}
-              onChange={setSmsText}
-              onSubmit={handleSmsPaste}
-            />
-          </div>
-        </div>
-      )}
-
       {confirmQueue.length > 0 && confirmFields && (
         <SmsConfirmModal
+          key={confirmQueue[0].raw}
           guess={confirmQueue[0].guess}
           fields={confirmFields}
           remaining={confirmQueue.length}
+          payees={ynabPayees}
+          payeesLoading={ynabPayeesLoading}
+          accounts={pushAccounts}
+          accountsLoading={pushAccountsLoading}
           onChange={setConfirmFields}
           onConfirm={confirmSmsFormat}
           onSkip={skipSmsConfirm}
@@ -1572,8 +1759,8 @@ export default function Home() {
 
       {/* Push to YNAB modal */}
       {showPushModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
+          <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full max-w-md overflow-hidden max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)]">
 
             {/* Header */}
             <div className="px-6 pt-6 pb-4 border-b border-gray-100 flex items-start justify-between">
@@ -1595,7 +1782,7 @@ export default function Home() {
               )}
             </div>
 
-            <div className="px-6 py-5 space-y-5">
+            <div className="px-5 sm:px-6 py-5 space-y-5 overflow-y-auto">
               {pushResult ? (
                 /* Result state */
                 <div className="space-y-4">
@@ -1807,7 +1994,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Payee picker dropdown (fixed-position portal) */}
+      {/* Payee picker */}
       {editingPayeeIndex !== null && dropdownPos && (
         <div
           data-payee-dropdown
@@ -1820,7 +2007,6 @@ export default function Home() {
           }}
           className="bg-white border border-gray-200 rounded-xl shadow-2xl overflow-hidden"
         >
-          {/* Search input */}
           <div className="px-3 pt-3 pb-2 border-b border-gray-100">
             <div className="relative">
               <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1842,8 +2028,6 @@ export default function Home() {
               />
             </div>
           </div>
-
-          {/* Payee list */}
           <div className="max-h-52 overflow-y-auto py-1 payee-scroll">
             {filteredPayees.length > 0 ? (
               filteredPayees.map((payee) => {
@@ -1878,23 +2062,86 @@ export default function Home() {
               <p className="px-3 py-3 text-sm text-gray-400 text-center">No payees found</p>
             )}
           </div>
-
-          {/* Footer */}
           <div className="px-3 py-2 border-t border-gray-100 flex items-center justify-between">
             <span className="text-xs text-gray-400">{ynabPayees.length} payees total</span>
-            <button
-              onClick={closePayeeDropdown}
-              className="text-xs text-gray-400 hover:text-gray-600"
-            >
+            <button onClick={closePayeeDropdown} className="text-xs text-gray-400 hover:text-gray-600">
               Cancel (Esc)
             </button>
           </div>
         </div>
       )}
 
+      {editingPayeeIndex !== null && !dropdownPos && (
+        <div className="fixed inset-0 bg-black/50 z-[200] flex items-end" onClick={closePayeeDropdown}>
+          <div
+            data-payee-dropdown
+            onClick={e => e.stopPropagation()}
+            className="bg-white rounded-t-2xl shadow-2xl w-full max-h-[80vh] flex flex-col"
+          >
+            <div className="px-5 pt-4 pb-3 border-b border-gray-100">
+              <h3 className="text-base font-semibold text-gray-900">Payee</h3>
+              <div className="relative mt-3">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input
+                  ref={payeeSearchRef}
+                  value={payeeSearch}
+                  onChange={(e) => setPayeeSearch(e.target.value)}
+                  placeholder="Search payees…"
+                  className="w-full min-h-[44px] pl-9 pr-3 py-2.5 text-base border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-ynab-green"
+                />
+              </div>
+            </div>
+            <div className="overflow-y-auto py-1 payee-scroll">
+              {filteredPayees.length > 0 ? (
+                filteredPayees.map((payee) => {
+                  const isCurrent =
+                    (overriddenPayees[editingPayeeIndex] ?? '') === payee ||
+                    (!overriddenPayees[editingPayeeIndex] &&
+                      matchResults[editingPayeeIndex]?.confidence >= 0.6 &&
+                      matchResults[editingPayeeIndex]?.payee === payee);
+                  return (
+                    <button
+                      key={payee}
+                      type="button"
+                      onClick={() => {
+                        overridePayee(editingPayeeIndex, payee);
+                        closePayeeDropdown();
+                      }}
+                      className={`w-full min-h-[48px] text-left px-5 py-3 text-base transition-colors flex items-center justify-between gap-2 ${
+                        isCurrent ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-800 active:bg-gray-50'
+                      }`}
+                    >
+                      <span>{payee}</span>
+                      {isCurrent && (
+                        <svg className="w-5 h-5 text-indigo-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        </svg>
+                      )}
+                    </button>
+                  );
+                })
+              ) : (
+                <p className="px-5 py-6 text-sm text-gray-400 text-center">No payees found</p>
+              )}
+            </div>
+            <div className="px-5 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-gray-100">
+              <button
+                type="button"
+                onClick={closePayeeDropdown}
+                className="w-full min-h-[48px] rounded-xl border border-gray-300 text-sm font-medium text-gray-700"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast */}
       {showToast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-ynab-navy text-white py-2.5 px-5 rounded-lg shadow-xl animate-fadeInUp text-sm flex items-center gap-2" role="alert">
+        <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 bg-ynab-navy text-white py-2.5 px-5 rounded-lg shadow-xl animate-fadeInUp text-sm flex items-center gap-2 max-w-[calc(100vw-2rem)]" role="alert">
           <svg className="w-4 h-4 text-ynab-green flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
