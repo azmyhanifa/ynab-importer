@@ -514,6 +514,20 @@ export default function Home() {
     if (toast) displayToast(toast);
   }, [smsTemplates, fieldsToRow, appendSmsRows, ynabPayees, cardAccounts, ynabCategories, payeeCategoryMap, lastSmsDate, rememberDate]);
 
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (isProcessing) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      const text = e.clipboardData?.getData('text')?.trim();
+      if (!text) return;
+      e.preventDefault();
+      ingestSmsText(text);
+    };
+    window.addEventListener('paste', onPaste, true);
+    return () => window.removeEventListener('paste', onPaste, true);
+  }, [ingestSmsText, isProcessing]);
+
   const closeConfirm = () => {
     setConfirmQueue([]);
     setConfirmFields(null);
@@ -1846,14 +1860,13 @@ export default function Home() {
                       </button>
                     </th>
                     <th className="w-[9.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
-                    <th className="w-[22%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
-                    <th className="w-[16%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Category</th>
+                    <th className="w-[20%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
+                    <th className="w-[18%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Category</th>
                     {hasAccountColumn && (
-                      <th className="w-[8.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Account</th>
+                      <th className="w-[9.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Account</th>
                     )}
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Memo</th>
-                    <th className="w-[6.25rem] px-3 py-2 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Outflow</th>
-                    <th className="w-[6.25rem] px-3 py-2 pr-4 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Inflow</th>
+                    <th className="w-[7.5rem] px-3 py-2 pr-4 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Amount</th>
                     {transactionStatuses.some(s => s) && (
                       <th className="w-[5.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Status</th>
                     )}
@@ -1883,6 +1896,8 @@ export default function Home() {
 
                     const isEditable = true;
                     const accountName = resolvedAccountName(transaction);
+                    const amount = transaction.Outflow || transaction.Inflow;
+                    const isInflow = !!transaction.Inflow;
 
                     return (
                       <tr
@@ -1945,17 +1960,17 @@ export default function Home() {
                         >
                           <span
                             title={transaction.categoryName || 'Uncategorized'}
-                            className={`inline-block max-w-full px-2 py-0.5 rounded-full text-[11px] leading-tight truncate align-middle ${
+                            className={`inline-flex items-center max-w-full px-2 py-0.5 rounded-full text-[11px] leading-tight ${
                               transaction.categoryName ? 'bg-gray-100 text-gray-700' : 'bg-gray-50 text-gray-400'
                             }`}
                           >
-                            {transaction.categoryName || 'Uncategorized'}
+                            <span className="truncate">{transaction.categoryName || 'Uncategorized'}</span>
                           </span>
                         </td>
                         {hasAccountColumn && (
                           <td className="px-3 py-2 align-middle max-w-0">
                             {accountName ? (
-                              <span className="block text-[11px] text-ynab-muted truncate" title={accountName}>
+                              <span className="block text-xs text-ynab-muted truncate" title={accountName}>
                                 {accountName}
                               </span>
                             ) : (
@@ -1975,11 +1990,22 @@ export default function Home() {
                                 SMS
                               </button>
                             )}
-                            <span className="truncate" title={transaction.Memo}>{transaction.Memo}</span>
+                            <span className="min-w-0 truncate" title={transaction.Memo}>{transaction.Memo}</span>
                           </div>
                         </td>
-                        <td className="px-3 py-2 align-middle whitespace-nowrap text-right text-foreground font-semibold tabular-nums text-sm">{transaction.Outflow}</td>
-                        <td className="px-3 py-2 pr-4 align-middle whitespace-nowrap text-right text-ynab-green font-semibold tabular-nums text-sm">{transaction.Inflow}</td>
+                        <td className="px-3 py-2 pr-4 align-middle whitespace-nowrap text-right">
+                          {amount ? (
+                            <span
+                              className={`inline-block tabular-nums font-semibold text-sm ${
+                                isInflow
+                                  ? 'rounded-md bg-ynab-green-light text-ynab-green px-1.5 py-0.5'
+                                  : 'text-foreground'
+                              }`}
+                            >
+                              {isInflow ? '+' : '−'}{amount}
+                            </span>
+                          ) : null}
+                        </td>
                         {transactionStatuses.some(s => s) && (
                           <td className="px-3 py-2 align-middle whitespace-nowrap">
                             {transactionStatuses[index] ? (
