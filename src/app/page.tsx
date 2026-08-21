@@ -331,7 +331,13 @@ export default function Home() {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingKind, setEditingKind] = useState<'payee' | 'category' | null>(null);
   const [pickerSearch, setPickerSearch] = useState('');
-  const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [dropdownPos, setDropdownPos] = useState<{
+    top?: number;
+    bottom?: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
   const pickerSearchRef = useRef<HTMLInputElement>(null);
   const [lastSmsDate, setLastSmsDate] = useState<string | null>(null);
   const ynabMenuRef = useRef<HTMLDivElement>(null);
@@ -1350,11 +1356,29 @@ export default function Home() {
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
-    setDropdownPos({
-      top: rect.bottom + 4,
-      left: Math.min(rect.left, window.innerWidth - 300),
-      width: Math.max(rect.width, 280),
-    });
+    const gap = 4;
+    const margin = 8;
+    const width = Math.min(Math.max(rect.width, 280), window.innerWidth - margin * 2);
+    const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+    const spaceBelow = window.innerHeight - rect.bottom - margin;
+    const spaceAbove = rect.top - margin;
+    const preferred = 320;
+    const placeAbove = spaceBelow < Math.min(preferred, 240) && spaceAbove > spaceBelow;
+    setDropdownPos(
+      placeAbove
+        ? {
+            bottom: window.innerHeight - rect.top + gap,
+            left,
+            width,
+            maxHeight: Math.max(160, spaceAbove),
+          }
+        : {
+            top: rect.bottom + gap,
+            left,
+            width,
+            maxHeight: Math.max(160, spaceBelow),
+          },
+    );
     requestAnimationFrame(() => pickerSearchRef.current?.focus());
   };
 
@@ -2269,13 +2293,15 @@ export default function Home() {
           style={{
             position: 'fixed',
             top: dropdownPos.top,
+            bottom: dropdownPos.bottom,
             left: dropdownPos.left,
             width: dropdownPos.width,
+            maxHeight: dropdownPos.maxHeight,
             zIndex: 200,
           }}
-          className="bg-white border border-gray-200 rounded-xl shadow-2xl overflow-hidden"
+          className="bg-white border border-gray-200 rounded-xl shadow-2xl overflow-hidden flex flex-col"
         >
-          <div className="px-3 pt-3 pb-2 border-b border-gray-100">
+          <div className="flex-shrink-0 px-3 pt-3 pb-2 border-b border-gray-100">
             <div className="relative">
               <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -2305,7 +2331,7 @@ export default function Home() {
               />
             </div>
           </div>
-          <div className="max-h-52 overflow-y-auto py-0.5 payee-scroll">
+          <div className="min-h-0 flex-1 overflow-y-auto py-0.5 payee-scroll">
             {editingKind === 'category' && (
               <button
                 type="button"
@@ -2364,7 +2390,7 @@ export default function Home() {
               </p>
             )}
           </div>
-          <div className="px-3 py-2 border-t border-gray-100 flex items-center justify-between">
+          <div className="flex-shrink-0 px-3 py-2 border-t border-gray-100 flex items-center justify-between">
             <span className="text-xs text-gray-400">
               {editingKind === 'category' ? `${ynabCategories.length} categories` : `${ynabPayees.length} payees total`}
             </span>
