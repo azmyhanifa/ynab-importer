@@ -81,7 +81,7 @@ function fieldsForConfirm(
   if (payee && saved[payee]) {
     payee = saved[payee];
   } else if (payee && ynabPayees.length) {
-    const match = findBestMatch(payee, ynabPayees);
+    const match = findBestMatch(payee, merchantPayees(ynabPayees));
     if (match.confidence >= 0.6) payee = match.payee;
   }
   const cat = findCategoryById(categories, fields.categoryId || payeeCategoryMap[payee]);
@@ -143,6 +143,10 @@ const YNAB_INTERNAL_PAYEE_PREFIXES = [
 
 const isInternalPayee = (name: string) =>
   YNAB_INTERNAL_PAYEE_PREFIXES.some(prefix => name.startsWith(prefix));
+
+function merchantPayees(names: string[]) {
+  return names.filter(name => !isInternalPayee(name));
+}
 
 const EXCLUDED_STATUSES = new Set([
   'cancelled', 'canceled', 'cancel',
@@ -1045,7 +1049,7 @@ export default function Home() {
       setMatchResults([]);
       return;
     }
-    const results = matchAll(convertedData.map(t => t.Payee), ynabPayees);
+    const results = matchAll(convertedData.map(t => t.Payee), merchantPayees(ynabPayees));
     setMatchResults(results);
   }, [convertedData, ynabPayees]);
 
@@ -1175,13 +1179,15 @@ export default function Home() {
         : Math.round(parseFloat(t.Inflow || '0') * 1000);
       const key = `${amount}:${t.Date}:${t.accountId}`;
       importIdCounts[key] = (importIdCounts[key] || 0) + 1;
+      const knownId = t.Payee ? ynabPayeeIdMap[t.Payee] : undefined;
+      const transfer = isInternalPayee(t.Payee);
       return {
         account_id: t.accountId as string,
         date: t.Date,
         amount,
-        payee_id: isInternalPayee(t.Payee) ? (ynabPayeeIdMap[t.Payee] ?? undefined) : undefined,
-        payee_name: !isInternalPayee(t.Payee) && t.Payee ? t.Payee : undefined,
-        category_id: t.categoryId || undefined,
+        payee_id: knownId || undefined,
+        payee_name: knownId || !t.Payee ? undefined : t.Payee,
+        category_id: transfer ? undefined : t.categoryId || undefined,
         memo: t.Memo || undefined,
         cleared: 'cleared' as const,
         approved: false,
