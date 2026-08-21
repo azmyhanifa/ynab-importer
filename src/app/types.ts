@@ -16,4 +16,6 @@ export interface YNABTransaction {
   source?: 'excel' | 'sms';
   last4?: string;
   accountId?: string;
+  categoryId?: string;
+  categoryName?: string;
 }

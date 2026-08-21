@@ -92,7 +92,7 @@ export default function ClipboardPasteButton({
                 ref={inputRef}
                 rows={4}
                 placeholder="Paste a bank SMS — or several, separated by a blank line"
-                className="w-full resize-y rounded-lg border border-ynab-border bg-white px-3 py-2 text-sm text-foreground placeholder:text-ynab-muted focus:outline-none focus:ring-2 focus:ring-ynab-green min-h-[96px]"
+                className="w-full resize-y rounded-lg border border-ynab-border bg-white px-3 py-2 text-base text-foreground placeholder:text-ynab-muted focus:outline-none focus:ring-2 focus:ring-ynab-green min-h-[96px]"
                 onPaste={e => {
                   const text = e.clipboardData.getData('text');
                   if (text.trim()) {
