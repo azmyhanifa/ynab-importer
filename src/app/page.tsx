@@ -1832,8 +1832,8 @@ export default function Home() {
             </div>
 
             {/* Desktop table */}
-            <div className="hidden md:block overflow-x-auto relative">
-              <table className="min-w-full text-sm">
+            <div className="hidden md:block overflow-hidden relative">
+              <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="bg-ynab-bg border-b border-ynab-border">
                     <th className="w-10 px-3 py-2">
@@ -1845,17 +1845,17 @@ export default function Home() {
                         {allSelected ? 'None' : 'All'}
                       </button>
                     </th>
-                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
-                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
-                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Category</th>
+                    <th className="w-[9.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
+                    <th className="w-[22%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
+                    <th className="w-[16%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Category</th>
                     {hasAccountColumn && (
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Account</th>
+                      <th className="w-[8.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Account</th>
                     )}
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Memo</th>
-                    <th className="px-3 py-2 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Outflow</th>
-                    <th className="px-3 py-2 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Inflow</th>
+                    <th className="w-[6.25rem] px-3 py-2 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Outflow</th>
+                    <th className="w-[6.25rem] px-3 py-2 pr-4 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Inflow</th>
                     {transactionStatuses.some(s => s) && (
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Status</th>
+                      <th className="w-[5.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Status</th>
                     )}
                   </tr>
                 </thead>
@@ -1893,7 +1893,7 @@ export default function Home() {
                             : 'bg-ynab-bg/30 opacity-50 hover:opacity-70'
                         }`}
                       >
-                        <td className="w-10 px-3 py-2.5">
+                        <td className="w-10 px-3 py-2 align-middle">
                           <input
                             type="checkbox"
                             checked={isRowSelected}
@@ -1907,7 +1907,7 @@ export default function Home() {
                             className="rounded border-ynab-border text-ynab-green focus:ring-ynab-green accent-ynab-green"
                           />
                         </td>
-                        <td className="px-3 py-2.5 whitespace-nowrap">
+                        <td className="px-3 py-2 align-middle">
                           <input
                             type="date"
                             value={transaction.Date}
@@ -1916,48 +1916,46 @@ export default function Home() {
                               rememberDate(v);
                               setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
                             }}
-                            className="bg-transparent text-ynab-muted text-base font-mono w-[10.5rem] focus:outline-none focus:text-foreground"
+                            className="bg-transparent text-ynab-muted text-xs font-mono w-[8.5rem] leading-none focus:outline-none focus:text-foreground"
                           />
                         </td>
                         <td
                           data-payee-cell
                           onClick={(e) => handlePayeeClick(e, index)}
-                          className={`px-3 py-2.5 whitespace-nowrap group ${isEditable ? 'cursor-pointer' : ''}`}
+                          className={`px-3 py-2 align-middle max-w-0 ${isEditable ? 'cursor-pointer' : ''}`}
                         >
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 min-w-0">
                             {matchResults.length > 0 && (
                               <span title={tooltipText} className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
                             )}
-                            <span className={`font-medium ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
+                            <span className={`font-medium truncate ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
                               {displayPayee}
                             </span>
                             {(isMatched && match.payee !== transaction.Payee) && (
-                              <span className="text-[11px] text-ynab-muted/70 truncate max-w-[100px]" title={transaction.Payee}>
+                              <span className="text-[11px] text-ynab-muted/70 truncate max-w-[5.5rem] flex-shrink-0" title={transaction.Payee}>
                                 ← {transaction.Payee}
                               </span>
-                            )}
-                            {isEditable && (
-                              <svg className="w-3 h-3 text-transparent group-hover:text-ynab-blue/40 flex-shrink-0 transition-colors ml-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                              </svg>
                             )}
                           </div>
                         </td>
                         <td
                           data-category-cell
                           onClick={(e) => handleCategoryClick(e, index)}
-                          className="px-3 py-2.5 whitespace-nowrap cursor-pointer"
+                          className="px-3 py-2 align-middle max-w-0 cursor-pointer"
                         >
-                          <span className={`inline-flex items-center max-w-[180px] px-2 py-0.5 rounded-full text-[11px] truncate ${
-                            transaction.categoryName ? 'bg-gray-100 text-gray-700' : 'bg-gray-50 text-gray-400'
-                          }`}>
+                          <span
+                            title={transaction.categoryName || 'Uncategorized'}
+                            className={`inline-block max-w-full px-2 py-0.5 rounded-full text-[11px] leading-tight truncate align-middle ${
+                              transaction.categoryName ? 'bg-gray-100 text-gray-700' : 'bg-gray-50 text-gray-400'
+                            }`}
+                          >
                             {transaction.categoryName || 'Uncategorized'}
                           </span>
                         </td>
                         {hasAccountColumn && (
-                          <td className="px-3 py-2.5 whitespace-nowrap">
+                          <td className="px-3 py-2 align-middle max-w-0">
                             {accountName ? (
-                              <span className="text-[11px] text-ynab-muted truncate max-w-[160px] inline-block align-bottom">
+                              <span className="block text-[11px] text-ynab-muted truncate" title={accountName}>
                                 {accountName}
                               </span>
                             ) : (
@@ -1965,7 +1963,7 @@ export default function Home() {
                             )}
                           </td>
                         )}
-                        <td className="px-3 py-2.5 text-ynab-muted text-xs max-w-[200px]">
+                        <td className="px-3 py-2 align-middle text-ynab-muted text-xs max-w-0">
                           <div className="flex items-center gap-1.5 min-w-0">
                             {transaction.source === 'sms' && (
                               <button
@@ -1980,10 +1978,10 @@ export default function Home() {
                             <span className="truncate" title={transaction.Memo}>{transaction.Memo}</span>
                           </div>
                         </td>
-                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-foreground font-semibold tabular-nums">{transaction.Outflow}</td>
-                        <td className="px-3 py-2.5 whitespace-nowrap text-right text-ynab-green font-semibold tabular-nums">{transaction.Inflow}</td>
+                        <td className="px-3 py-2 align-middle whitespace-nowrap text-right text-foreground font-semibold tabular-nums text-sm">{transaction.Outflow}</td>
+                        <td className="px-3 py-2 pr-4 align-middle whitespace-nowrap text-right text-ynab-green font-semibold tabular-nums text-sm">{transaction.Inflow}</td>
                         {transactionStatuses.some(s => s) && (
-                          <td className="px-3 py-2.5 whitespace-nowrap">
+                          <td className="px-3 py-2 align-middle whitespace-nowrap">
                             {transactionStatuses[index] ? (
                               <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
                                 {getStatusBadge(transactionStatuses[index]).label}
