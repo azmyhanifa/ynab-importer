@@ -8,6 +8,8 @@ export interface SmsParseFields {
   direction: SmsDirection;
   date: string;
   accountId?: string;
+  categoryId?: string;
+  categoryName?: string;
 }
 
 export const USD_TO_AED = 3.75;
@@ -61,11 +63,17 @@ const IGNORE_AMOUNT_RE = /\b(avl|avail(?:able)?|limit|balance|bal\.?|cr\.?\s*lim
 const LAST4_RE = /(?:ending[:\s]+|(?:card|cc)(?:\s+no\.?)?[:\s]+(?:xx+|[*x]{2,})?|(?:xx|[*x]{2,}))\s*(\d{4})/i;
 const LAST4_FALLBACK_RE = /(?:card|credit\s+card)[^\d]{0,20}(\d{4})/i;
 const OUTFLOW_RE = /\b(purchase|payment|pos|withdrawal|withdrawn|spent|debit|paid|charge[ds]?)\b/i;
-const INFLOW_RE = /\b(refund|credited|received|deposit|salary|reversed|reversal|cashback)\b/i;
-const TRANSFER_RE = /\b(?:has been\s+)?transferred\s+to your account\b|\bhas been transferred\b/i;
-const PAYEE_STOP_RE = /(?:\s+with\s+(?:credit|debit)\s+card)|(?:\s+ending\b)|(?:\s*\.(?:\s|$))|(?:\s+on\s+\d)|(?:\s+Avl\b)|(?:\s+Avail)|(?:\s+Balance\b)|(?:\s+Available\b)|(?:,?\s*\+\d)/i;
+const INFLOW_RE = /\b(refund(?:ed|s)?|credited|received|deposit|salary|reversed|reversal|cashback)\b/i;
+const REFUND_RE = /\brefund(?:ed|s)?\b|\breversed\b|\breversal\b|\bcashback\b/i;
+const PURCHASE_LANG_RE = /\b(?:purchase|payment|pos|spent|charge[ds]?)\b/i;
+const MERCHANT_AT_RE = /\bat\s+\S/i;
+const TRANSFER_RE =
+  /\b(?:has been\s+)?transferred\s+to your (?:card )?account\b|\bhas been transferred\b|\bfunds?\s+transfer(?:red)?\b|\b(?:inward|outward)\s+transfer\b|\btransferred from\b/i;
+const PAYEE_STOP_RE =
+  /(?:\s+with\s+(?:credit|debit)\s+card)|(?:\s+on\s+your\s+(?:credit|debit)\s+card)|(?:\s+has been\s+refunded)|(?:\s+ending\b)|(?:\s*\.(?:\s|$))|(?:\s+on\s+\d)|(?:\s+Avl\b)|(?:\s+Avail)|(?:\s+Balance\b)|(?:\s+Available\b)|(?:,?\s*\+\d)/i;
 const PHONE_TRAIL_RE = /,?\s*\+?\d[\d\s\-()]{6,}\s*$/;
-const DIRECTION_VERB_GROUP = '(?:Purchase|Payment|Refund|POS|Withdrawal|Withdrawn|Spent|Debit|Paid|Charged|Credited|Received|Deposit)';
+const DIRECTION_VERB_GROUP =
+  '(?:Purchase|Payment|Refund(?:ed)?|POS|Withdrawal|Withdrawn|Spent|Debit|Paid|Charged|Credited|Received|Deposit)';
 const DATE_ON_RE = /\bon\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i;
 const DATE_TEXT_RE = /\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{2,4})/i;
 
@@ -137,14 +145,20 @@ function parseNumericDate(s: string): string | null {
   return `${year}-${month}-${day}`;
 }
 
+export function isRefund(raw: string): boolean {
+  return REFUND_RE.test(raw);
+}
+
 export function isTransfer(raw: string): boolean {
+  if (isRefund(raw)) return false;
+  if (PURCHASE_LANG_RE.test(raw) && MERCHANT_AT_RE.test(raw)) return false;
   return TRANSFER_RE.test(raw);
 }
 
 function guessDirection(raw: string): SmsDirection {
+  if (isRefund(raw)) return 'inflow';
   if (isTransfer(raw)) return 'inflow';
   if (INFLOW_RE.test(raw) && !OUTFLOW_RE.test(raw)) return 'inflow';
-  if (INFLOW_RE.test(raw) && /\brefund\b/i.test(raw)) return 'inflow';
   return 'outflow';
 }
 
@@ -218,20 +232,20 @@ function findPayee(raw: string): { value: string; start: number; end: number } |
   const rawEnd = endRel === -1 ? raw.length : start + endRel;
   const original = raw.slice(start, rawEnd).trim();
   const value = stripPayeeNoise(original);
-  if (!value) return null;
+  if (!value || value.length > 80 || value === raw.trim()) return null;
   const inRaw = raw.indexOf(value, start);
   const spanStart = inRaw >= 0 ? inRaw : start;
   return { value, start: spanStart, end: spanStart + value.length };
 }
 
-export function guessSms(raw: string): SmsGuess {
+export function guessSms(raw: string, fallbackDate?: string): SmsGuess {
   const text = raw.replace(/[\u201C\u201D]/g, '"').trim();
   const transfer = isTransfer(text);
   const money = findMoneyHits(text);
   const txn = money.find(h => !h.ignored) ?? money[0];
   const last4 = findLast4(text);
   const payee = findPayee(text);
-  const date = parseDateString(text) || todayISO();
+  const date = parseDateString(text) || fallbackDate || todayISO();
   const direction = guessDirection(text);
 
   const fields: SmsParseFields = {
@@ -272,7 +286,7 @@ function generalizeLiteral(literal: string): string {
     .map((part, i) => {
       if (i % 2 === 1) return '\\d[\\d,.]*';
       return escapeRegex(part)
-        .replace(/\b(?:Purchase|Payment|Refund|POS|Withdrawal|Withdrawn|Spent|Debit|Paid|Charged|Credited|Received|Deposit)\b/gi, DIRECTION_VERB_GROUP)
+        .replace(/\b(?:Purchase|Payment|Refund(?:ed)?|POS|Withdrawal|Withdrawn|Spent|Debit|Paid|Charged|Credited|Received|Deposit)\b/gi, DIRECTION_VERB_GROUP)
         .replace(/\s+/g, '\\s+');
     })
     .join('');
@@ -438,7 +452,11 @@ function highlightsFromMatch(raw: string, match: RegExpExecArray, fields: SmsPar
   return highlights;
 }
 
-export function matchTemplate(raw: string, templates: SmsTemplate[]): TemplateMatch | null {
+export function matchTemplate(
+  raw: string,
+  templates: SmsTemplate[],
+  fallbackDate?: string,
+): TemplateMatch | null {
   const text = raw.trim();
   for (const template of templates) {
     let re: RegExp;
@@ -463,7 +481,7 @@ export function matchTemplate(raw: string, templates: SmsTemplate[]): TemplateMa
       last4: m.groups.last4 || '',
       payee,
       direction: guessDirection(text),
-      date: parseDateString(text) || todayISO(),
+      date: parseDateString(text) || fallbackDate || todayISO(),
     };
     return {
       fields,

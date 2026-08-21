@@ -19,14 +19,29 @@ import {
 import {
   loadCardAccounts,
   loadDraft,
+  loadLastSmsDate,
+  loadPayeeCategories,
   loadSmsTemplates,
+  persistPayeeCategory,
   saveCardAccounts,
   saveDraft,
+  saveLastSmsDate,
+  savePayeeCategories,
   saveSmsTemplates,
 } from './lib/storage';
+import {
+  buildPayeeCategoryMap,
+  categoryLabel,
+  findCategoryById,
+  findCategoryByLabel,
+  flattenCategories,
+  type YnabCategory,
+} from './lib/ynabCategories';
+import { iosFocusHandoff } from './lib/iosFocus';
 import ClipboardPasteButton from './components/SmsPastePanel';
 import SmsConfirmModal from './components/SmsConfirmModal';
 import CardAccountModal from './components/CardAccountModal';
+import { PickerSheet } from './components/SearchPicker';
 import type { YNABAccount, YNABTransaction } from './types';
 
 const YNAB_API_BASE = 'https://api.ynab.com/v1';
@@ -57,6 +72,9 @@ function fieldsForConfirm(
   fields: SmsParseFields,
   ynabPayees: string[] = [],
   cardMap: Record<string, string> = {},
+  categories: YnabCategory[] = [],
+  payeeCategoryMap: Record<string, string> = {},
+  fallbackDate?: string,
 ): SmsParseFields {
   const saved = loadSavedMappings();
   let payee = fields.payee;
@@ -66,13 +84,41 @@ function fieldsForConfirm(
     const match = findBestMatch(payee, ynabPayees);
     if (match.confidence >= 0.6) payee = match.payee;
   }
+  const cat = findCategoryById(categories, fields.categoryId || payeeCategoryMap[payee]);
   return {
     ...fields,
     amount: toAed(fields.amount, fields.currency),
     currency: 'AED',
     payee,
+    date: fields.date || fallbackDate || todayISO(),
     accountId: fields.accountId || (fields.last4 ? cardMap[fields.last4] : '') || '',
+    categoryId: cat?.id ?? fields.categoryId ?? '',
+    categoryName: cat?.name ?? fields.categoryName ?? '',
   };
+}
+
+function formatDateHeader(iso: string): string {
+  if (!iso) return 'No date';
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || !m || !d) return iso;
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function groupIndicesByDate(data: YNABTransaction[]): { date: string; indices: number[] }[] {
+  const map = new Map<string, number[]>();
+  data.forEach((t, i) => {
+    const key = t.Date || '';
+    const list = map.get(key);
+    if (list) list.push(i);
+    else map.set(key, [i]);
+  });
+  return [...map.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0))
+    .map(([date, indices]) => ({ date, indices }));
 }
 
 function ingestToastMessage(added: number, pending: number): string | null {
@@ -276,13 +322,18 @@ export default function Home() {
   const [ynabPayees, setYnabPayees] = useState<string[]>([]);
   const [ynabPayeeIdMap, setYnabPayeeIdMap] = useState<Record<string, string>>({});
   const [ynabPayeesLoading, setYnabPayeesLoading] = useState(false);
+  const [ynabCategories, setYnabCategories] = useState<YnabCategory[]>([]);
+  const [ynabCategoriesLoading, setYnabCategoriesLoading] = useState(false);
+  const [payeeCategoryMap, setPayeeCategoryMap] = useState<Record<string, string>>({});
   const [matchResults, setMatchResults] = useState<MatchResult[]>([]);
   const [overriddenPayees, setOverriddenPayees] = useState<Record<number, string>>({});
   const [transactionStatuses, setTransactionStatuses] = useState<string[]>([]);
-  const [editingPayeeIndex, setEditingPayeeIndex] = useState<number | null>(null);
-  const [payeeSearch, setPayeeSearch] = useState('');
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editingKind, setEditingKind] = useState<'payee' | 'category' | null>(null);
+  const [pickerSearch, setPickerSearch] = useState('');
   const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; width: number } | null>(null);
-  const payeeSearchRef = useRef<HTMLInputElement>(null);
+  const pickerSearchRef = useRef<HTMLInputElement>(null);
+  const [lastSmsDate, setLastSmsDate] = useState<string | null>(null);
   const ynabMenuRef = useRef<HTMLDivElement>(null);
   const accountsBudgetRef = useRef('');
 
@@ -336,10 +387,33 @@ export default function Home() {
     );
   }, []);
 
+  const rememberDate = useCallback((date: string) => {
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+    setLastSmsDate(date);
+    saveLastSmsDate(date);
+  }, []);
+
+  const categoryForPayee = useCallback((payee: string, fallback?: SmsParseFields) => {
+    const mapped = loadSavedMappings()[payee] || payee;
+    const id = payeeCategoryMap[mapped] || payeeCategoryMap[payee] || fallback?.categoryId;
+    const cat = findCategoryById(ynabCategories, id);
+    if (cat) return { categoryId: cat.id, categoryName: cat.name };
+    if (id) return { categoryId: id, categoryName: fallback?.categoryName ?? '' };
+    if (fallback?.categoryName) {
+      return { categoryId: fallback.categoryId ?? '', categoryName: fallback.categoryName };
+    }
+    return { categoryId: '', categoryName: '' };
+  }, [payeeCategoryMap, ynabCategories]);
+
   const fieldsToRow = useCallback((fields: SmsParseFields, raw: string): YNABTransaction => {
     const amount = toAed(fields.amount, fields.currency);
+    const mappedPayee = loadSavedMappings()[fields.payee] || fields.payee;
+    const hasCat = fields.categoryId !== undefined || fields.categoryName !== undefined;
+    const cats = hasCat
+      ? { categoryId: fields.categoryId ?? '', categoryName: fields.categoryName ?? '' }
+      : categoryForPayee(mappedPayee, fields);
     return {
-      Date: fields.date || todayISO(),
+      Date: fields.date || lastSmsDate || todayISO(),
       Payee: fields.payee,
       Memo: raw,
       Outflow: fields.direction === 'outflow' ? amount : '',
@@ -347,8 +421,10 @@ export default function Home() {
       source: 'sms',
       last4: fields.last4 || undefined,
       accountId: fields.accountId || (fields.last4 ? cardAccounts[fields.last4] : undefined) || undefined,
+      categoryId: cats.categoryId,
+      categoryName: cats.categoryName,
     };
-  }, [cardAccounts]);
+  }, [cardAccounts, categoryForPayee, lastSmsDate]);
 
   const appendSmsRows = useCallback((rows: YNABTransaction[]) => {
     if (rows.length === 0) return;
@@ -395,32 +471,42 @@ export default function Home() {
   const ingestSmsText = useCallback((text: string) => {
     const messages = splitSmsMessages(text);
     if (messages.length === 0) return;
+    const fallbackDate = lastSmsDate || undefined;
 
     const autoRows: YNABTransaction[] = [];
     const needsConfirm: { raw: string; guess: SmsGuess }[] = [];
 
     for (const raw of messages) {
-      const matched = matchTemplate(raw, smsTemplates);
+      const matched = matchTemplate(raw, smsTemplates, fallbackDate);
       if (matched) {
         autoRows.push(fieldsToRow(matched.fields, raw));
       } else {
-        needsConfirm.push({ raw, guess: guessSms(raw) });
+        needsConfirm.push({ raw, guess: guessSms(raw, fallbackDate) });
       }
     }
 
     if (autoRows.length) {
       appendSmsRows(autoRows);
+      const dated = autoRows.map(r => r.Date).filter(Boolean);
+      if (dated.length) rememberDate(dated[dated.length - 1]);
     }
 
     if (needsConfirm.length) {
       setConfirmQueue(needsConfirm);
-      setConfirmFields(fieldsForConfirm(needsConfirm[0].guess.fields, ynabPayees, cardAccounts));
+      setConfirmFields(fieldsForConfirm(
+        needsConfirm[0].guess.fields,
+        ynabPayees,
+        cardAccounts,
+        ynabCategories,
+        payeeCategoryMap,
+        fallbackDate,
+      ));
       setFixRowIndex(null);
     }
 
     const toast = ingestToastMessage(autoRows.length, needsConfirm.length);
     if (toast) displayToast(toast);
-  }, [smsTemplates, fieldsToRow, appendSmsRows, ynabPayees, cardAccounts]);
+  }, [smsTemplates, fieldsToRow, appendSmsRows, ynabPayees, cardAccounts, ynabCategories, payeeCategoryMap, lastSmsDate, rememberDate]);
 
   const closeConfirm = () => {
     setConfirmQueue([]);
@@ -434,7 +520,14 @@ export default function Home() {
       return;
     }
     setConfirmQueue(rest);
-    setConfirmFields(fieldsForConfirm(rest[0].guess.fields, ynabPayees, cardAccounts));
+    setConfirmFields(fieldsForConfirm(
+      rest[0].guess.fields,
+      ynabPayees,
+      cardAccounts,
+      ynabCategories,
+      payeeCategoryMap,
+      lastSmsDate || undefined,
+    ));
   };
 
   const confirmSmsFormat = () => {
@@ -443,6 +536,11 @@ export default function Home() {
     const extractedPayee = current.guess.fields.payee;
     const mappedPayee = confirmFields.payee;
     persistPayeeMapping(extractedPayee, mappedPayee);
+    if (mappedPayee && confirmFields.categoryId) {
+      persistPayeeCategory(mappedPayee, confirmFields.categoryId);
+      setPayeeCategoryMap(prev => ({ ...prev, [mappedPayee]: confirmFields.categoryId as string }));
+    }
+    if (confirmFields.date) rememberDate(confirmFields.date);
 
     if (confirmFields.last4 && confirmFields.accountId) {
       rememberCardAccount(confirmFields.last4, confirmFields.accountId);
@@ -491,7 +589,7 @@ export default function Home() {
     const autoRows: YNABTransaction[] = [];
     const stillNeed: { raw: string; guess: SmsGuess }[] = [];
     for (const item of rest) {
-      const matched = matchTemplate(item.raw, nextTemplates);
+      const matched = matchTemplate(item.raw, nextTemplates, lastSmsDate || undefined);
       if (matched) {
         autoRows.push(fieldsToRow(attachAccount(matched.fields), item.raw));
       } else {
@@ -518,7 +616,7 @@ export default function Home() {
   const openFixFormat = (index: number) => {
     const row = convertedData[index];
     if (!row?.Memo) return;
-    const guess = guessSms(row.Memo);
+    const guess = guessSms(row.Memo, lastSmsDate || undefined);
     const fields: SmsParseFields = {
       ...guess.fields,
       amount: row.Outflow || row.Inflow || toAed(guess.fields.amount, guess.fields.currency),
@@ -528,10 +626,19 @@ export default function Home() {
       date: row.Date || guess.fields.date,
       direction: row.Inflow ? 'inflow' : 'outflow',
       accountId: row.accountId || '',
+      categoryId: row.categoryId || '',
+      categoryName: row.categoryName || '',
     };
     setFixRowIndex(index);
     setConfirmQueue([{ raw: row.Memo, guess }]);
-    setConfirmFields(fieldsForConfirm(fields, ynabPayees, cardAccounts));
+    setConfirmFields(fieldsForConfirm(
+      fields,
+      ynabPayees,
+      cardAccounts,
+      ynabCategories,
+      payeeCategoryMap,
+      lastSmsDate || undefined,
+    ));
   };
 
   const fetchYnabAccounts = useCallback(async (budgetId: string, key: string) => {
@@ -552,6 +659,53 @@ export default function Home() {
       console.error('Failed to fetch accounts', err);
     } finally {
       setPushAccountsLoading(false);
+    }
+  }, []);
+
+  const fetchBudgetExtras = useCallback(async (budgetId: string, key: string) => {
+    setYnabPayeesLoading(true);
+    setYnabCategoriesLoading(true);
+    try {
+      const since = new Date();
+      since.setDate(since.getDate() - 90);
+      const sinceDate = todayISO(since);
+      const headers = { Authorization: `Bearer ${key}` };
+      const [pRes, cRes, tRes] = await Promise.all([
+        fetch(`${YNAB_API_BASE}/budgets/${budgetId}/payees`, { headers }),
+        fetch(`${YNAB_API_BASE}/budgets/${budgetId}/categories`, { headers }),
+        fetch(`${YNAB_API_BASE}/budgets/${budgetId}/transactions?since_date=${sinceDate}`, { headers }),
+      ]);
+
+      if (pRes.ok) {
+        const pData = await pRes.json();
+        const raw: { id: string; name: string; deleted: boolean }[] = (pData.data?.payees ?? []).filter(
+          (p: { deleted: boolean }) => !p.deleted,
+        );
+        setYnabPayees(raw.map(p => p.name));
+        setYnabPayeeIdMap(Object.fromEntries(raw.map(p => [p.name, p.id])));
+      }
+
+      if (cRes.ok) {
+        const cData = await cRes.json();
+        setYnabCategories(flattenCategories(cData.data?.category_groups ?? []));
+      }
+
+      const saved = loadPayeeCategories();
+      if (tRes.ok) {
+        const tData = await tRes.json();
+        const seeded = buildPayeeCategoryMap(tData.data?.transactions ?? []);
+        const merged = { ...seeded, ...saved };
+        savePayeeCategories(merged);
+        setPayeeCategoryMap(merged);
+      } else {
+        setPayeeCategoryMap(saved);
+      }
+    } catch (err) {
+      console.error('Failed to fetch budget extras', err);
+      setPayeeCategoryMap(loadPayeeCategories());
+    } finally {
+      setYnabPayeesLoading(false);
+      setYnabCategoriesLoading(false);
     }
   }, []);
 
@@ -676,7 +830,6 @@ export default function Home() {
 
       const ynabData = convertToYNABFormat(bankTransactions);
       const statuses = bankTransactions.map(t => t.Status || '');
-      setConvertedData(ynabData);
       setTransactionStatuses(statuses);
 
       // Select all except rows with bad statuses
@@ -687,6 +840,7 @@ export default function Home() {
 
       // Auto-apply saved payee mappings
       const saved = loadSavedMappings();
+      const catMap = loadPayeeCategories();
       const autoOverrides: Record<number, string> = {};
       ynabData.forEach((t, i) => {
         if (t.Payee && saved[t.Payee]) {
@@ -694,6 +848,13 @@ export default function Home() {
         }
       });
       setOverriddenPayees(autoOverrides);
+      setConvertedData(
+        ynabData.map((t, i) => {
+          const payee = autoOverrides[i] || t.Payee;
+          const catId = catMap[payee];
+          return catId ? { ...t, categoryId: catId } : t;
+        }),
+      );
 
     } catch (error: unknown) {
       console.error('Error processing file:', error);
@@ -745,6 +906,7 @@ export default function Home() {
         return {
           Date: t.Date,
           Payee: payee,
+          Category: t.categoryName || '',
           Memo: t.Memo,
           Outflow: t.Outflow,
           Inflow: t.Inflow,
@@ -782,6 +944,8 @@ export default function Home() {
     setSmsTemplates(loadSmsTemplates());
     const cards = loadCardAccounts();
     setCardAccounts(cards);
+    setPayeeCategoryMap(loadPayeeCategories());
+    setLastSmsDate(loadLastSmsDate());
     const draft = loadDraft();
     if (draft) {
       setConvertedData(
@@ -843,22 +1007,7 @@ export default function Home() {
 
         if (targetBudgetId) {
           setSelectedBudgetId(targetBudgetId);
-          setYnabPayeesLoading(true);
-          try {
-            const pRes = await fetch(`${YNAB_API_BASE}/budgets/${targetBudgetId}/payees`, {
-              headers: { Authorization: `Bearer ${storedKey}` },
-            });
-            if (pRes.ok) {
-              const pData = await pRes.json();
-              const raw: { id: string; name: string; deleted: boolean }[] = (
-                pData.data?.payees ?? []
-              ).filter((p: { deleted: boolean }) => !p.deleted);
-              setYnabPayees(raw.map(p => p.name));
-              setYnabPayeeIdMap(Object.fromEntries(raw.map(p => [p.name, p.id])));
-            }
-          } finally {
-            setYnabPayeesLoading(false);
-          }
+          await fetchBudgetExtras(targetBudgetId, storedKey);
           fetchYnabAccounts(targetBudgetId, storedKey);
         }
       } catch (err) {
@@ -867,7 +1016,7 @@ export default function Home() {
         setYnabConnecting(false);
       }
     })();
-  }, [fetchYnabAccounts]);
+  }, [fetchYnabAccounts, fetchBudgetExtras]);
 
   // Re-run merchant matching whenever transactions or payee list changes
   useEffect(() => {
@@ -878,6 +1027,35 @@ export default function Home() {
     const results = matchAll(convertedData.map(t => t.Payee), ynabPayees);
     setMatchResults(results);
   }, [convertedData, ynabPayees]);
+
+  useEffect(() => {
+    if (!ynabCategories.length) return;
+    setConvertedData(prev => {
+      let changed = false;
+      const next = prev.map((t, i) => {
+        if (t.categoryId !== undefined || t.categoryName !== undefined) {
+          if (t.categoryId && !t.categoryName) {
+            const named = findCategoryById(ynabCategories, t.categoryId);
+            if (named) {
+              changed = true;
+              return { ...t, categoryName: named.name };
+            }
+          }
+          return t;
+        }
+        const override = overriddenPayees[i];
+        const match = matchResults[i];
+        const payee =
+          override ??
+          (match && match.confidence >= 0.6 ? match.payee : t.Payee);
+        const cat = categoryForPayee(payee);
+        if (!cat.categoryId && !cat.categoryName) return t;
+        changed = true;
+        return { ...t, categoryId: cat.categoryId || undefined, categoryName: cat.categoryName || undefined };
+      });
+      return changed ? next : prev;
+    });
+  }, [ynabCategories, payeeCategoryMap, matchResults, overriddenPayees, categoryForPayee]);
 
   const connectYNAB = async () => {
     const key = ynabApiKey.trim();
@@ -925,6 +1103,7 @@ export default function Home() {
     setSelectedBudgetId('');
     setYnabPayees([]);
     setYnabPayeeIdMap({});
+    setYnabCategories([]);
     setMatchResults([]);
     localStorage.removeItem(YNAB_API_KEY_STORAGE);
     localStorage.removeItem(YNAB_BUDGET_ID_STORAGE);
@@ -981,6 +1160,7 @@ export default function Home() {
         amount,
         payee_id: isInternalPayee(t.Payee) ? (ynabPayeeIdMap[t.Payee] ?? undefined) : undefined,
         payee_name: !isInternalPayee(t.Payee) && t.Payee ? t.Payee : undefined,
+        category_id: t.categoryId || undefined,
         memo: t.Memo || undefined,
         cleared: 'cleared' as const,
         approved: false,
@@ -1022,12 +1202,11 @@ export default function Home() {
 
   const overridePayee = useCallback((index: number, ynabPayeeName: string) => {
     const bankPayee = convertedData[index]?.Payee;
+    const cat = categoryForPayee(ynabPayeeName);
 
     setOverriddenPayees(prev => {
       const next = { ...prev };
-      // Always set the one the user explicitly picked
       next[index] = ynabPayeeName;
-      // Bulk-apply to all rows with the same original bank payee that don't already have a manual override
       if (bankPayee) {
         convertedData.forEach((t, i) => {
           if (i !== index && t.Payee === bankPayee && prev[i] === undefined) {
@@ -1038,46 +1217,74 @@ export default function Home() {
       return next;
     });
 
-    // Persist to localStorage
+    if (cat.categoryId || cat.categoryName) {
+      setConvertedData(prev =>
+        prev.map((t, i) => {
+          const sameBank = bankPayee && t.Payee === bankPayee;
+          if (i === index || (sameBank && overriddenPayees[i] === undefined)) {
+            return { ...t, categoryId: cat.categoryId || undefined, categoryName: cat.categoryName || undefined };
+          }
+          return t;
+        }),
+      );
+    }
+
     if (bankPayee) {
       const saved = loadSavedMappings();
       saved[bankPayee] = ynabPayeeName;
       saveMappings(saved);
     }
-  }, [convertedData]);
+  }, [convertedData, categoryForPayee, overriddenPayees]);
 
-  const closePayeeDropdown = useCallback(() => {
-    setEditingPayeeIndex(null);
+  const overrideCategory = useCallback((index: number, categoryId: string, categoryName: string) => {
+    const bankPayee = convertedData[index]?.Payee;
+    const displayPayee =
+      overriddenPayees[index] ??
+      (matchResults[index]?.confidence >= 0.6 ? matchResults[index].payee : bankPayee);
+
+    setConvertedData(prev =>
+      prev.map((t, i) => {
+        const sameBank = bankPayee && t.Payee === bankPayee;
+        if (i === index || (sameBank && overriddenPayees[i] === undefined)) {
+          return {
+            ...t,
+            categoryId: categoryId,
+            categoryName: categoryName,
+          };
+        }
+        return t;
+      }),
+    );
+
+    if (displayPayee) {
+      persistPayeeCategory(displayPayee, categoryId);
+      setPayeeCategoryMap(prev => {
+        const next = { ...prev };
+        if (categoryId) next[displayPayee] = categoryId;
+        else delete next[displayPayee];
+        return next;
+      });
+    }
+  }, [convertedData, overriddenPayees, matchResults]);
+
+  const closePicker = useCallback(() => {
+    setEditingIndex(null);
+    setEditingKind(null);
     setDropdownPos(null);
+    setPickerSearch('');
   }, []);
 
   const selectBudget = async (budgetId: string) => {
     setSelectedBudgetId(budgetId);
     setYnabPayees([]);
+    setYnabCategories([]);
     setMatchResults([]);
     if (!budgetId) {
       localStorage.removeItem(YNAB_BUDGET_ID_STORAGE);
       return;
     }
     localStorage.setItem(YNAB_BUDGET_ID_STORAGE, budgetId);
-
-    setYnabPayeesLoading(true);
-    try {
-      const res = await fetch(`${YNAB_API_BASE}/budgets/${budgetId}/payees`, {
-        headers: { Authorization: `Bearer ${ynabApiKey}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const raw: { id: string; name: string; deleted: boolean }[] =
-          (data.data?.payees ?? []).filter((p: { deleted: boolean }) => !p.deleted);
-        setYnabPayees(raw.map(p => p.name));
-        setYnabPayeeIdMap(Object.fromEntries(raw.map(p => [p.name, p.id])));
-      }
-    } catch (err) {
-      console.error('Failed to fetch payees', err);
-    } finally {
-      setYnabPayeesLoading(false);
-    }
+    await fetchBudgetExtras(budgetId, ynabApiKey);
     fetchYnabAccounts(budgetId, ynabApiKey);
   };
 
@@ -1093,25 +1300,18 @@ export default function Home() {
     return () => document.removeEventListener('mousedown', handler);
   }, [showYnabMenu]);
 
-  // Focus search input when dropdown opens
-  useEffect(() => {
-    if (editingPayeeIndex !== null) {
-      setTimeout(() => payeeSearchRef.current?.focus(), 0);
-    }
-  }, [editingPayeeIndex]);
-
   // Close dropdown on outside click or scroll
   useEffect(() => {
-    if (editingPayeeIndex === null) return;
+    if (editingIndex === null) return;
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Element;
-      if (!target.closest('[data-payee-dropdown]') && !target.closest('[data-payee-cell]')) {
-        closePayeeDropdown();
+      if (!target.closest('[data-payee-dropdown]') && !target.closest('[data-payee-cell]') && !target.closest('[data-category-cell]')) {
+        closePicker();
       }
     };
     const handleScroll = (e: Event) => {
       if ((e.target as Element | null)?.closest?.('[data-payee-dropdown]')) return;
-      closePayeeDropdown();
+      closePicker();
     };
     document.addEventListener('mousedown', handleClickOutside);
     window.addEventListener('scroll', handleScroll, true);
@@ -1119,20 +1319,33 @@ export default function Home() {
       document.removeEventListener('mousedown', handleClickOutside);
       window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [editingPayeeIndex, closePayeeDropdown]);
+  }, [editingIndex, closePicker]);
 
   const filteredPayees = useMemo(() => {
-    const q = payeeSearch.trim().toLowerCase();
-    if (!q) return ynabPayees.slice(0, 20);
-    return ynabPayees.filter(p => p.toLowerCase().includes(q)).slice(0, 30);
-  }, [payeeSearch, ynabPayees]);
+    const q = pickerSearch.trim().toLowerCase();
+    if (!q) return ynabPayees.slice(0, 40);
+    return ynabPayees.filter(p => p.toLowerCase().includes(q)).slice(0, 50);
+  }, [pickerSearch, ynabPayees]);
 
-  const handlePayeeClick = (e: React.MouseEvent<HTMLElement>, index: number) => {
-    if (ynabPayees.length === 0) return;
-    setEditingPayeeIndex(index);
-    setPayeeSearch('');
+  const categoryOptions = useMemo(() => ynabCategories.map(categoryLabel), [ynabCategories]);
+
+  const filteredCategories = useMemo(() => {
+    const q = pickerSearch.trim().toLowerCase();
+    if (!q) return categoryOptions.slice(0, 40);
+    return categoryOptions.filter(p => p.toLowerCase().includes(q)).slice(0, 50);
+  }, [pickerSearch, categoryOptions]);
+
+  const openRowPicker = (
+    e: React.MouseEvent<HTMLElement>,
+    index: number,
+    kind: 'payee' | 'category',
+  ) => {
+    setEditingIndex(index);
+    setEditingKind(kind);
+    setPickerSearch('');
     if (window.innerWidth < 768) {
       setDropdownPos(null);
+      iosFocusHandoff(() => pickerSearchRef.current);
       return;
     }
     const rect = e.currentTarget.getBoundingClientRect();
@@ -1141,6 +1354,16 @@ export default function Home() {
       left: Math.min(rect.left, window.innerWidth - 300),
       width: Math.max(rect.width, 280),
     });
+    requestAnimationFrame(() => pickerSearchRef.current?.focus());
+  };
+
+  const handlePayeeClick = (e: React.MouseEvent<HTMLElement>, index: number) => {
+    openRowPicker(e, index, 'payee');
+  };
+
+  const handleCategoryClick = (e: React.MouseEvent<HTMLElement>, index: number) => {
+    if (ynabCategories.length === 0) return;
+    openRowPicker(e, index, 'category');
   };
 
   const selectedBudget = ynabBudgets.find(b => b.id === selectedBudgetId);
@@ -1216,7 +1439,7 @@ export default function Home() {
                           onChange={(e) => { setYnabApiKey(e.target.value); setYnabError(''); }}
                           onKeyDown={(e) => e.key === 'Enter' && connectYNAB()}
                           placeholder="API key…"
-                          className="w-full px-3 py-2 pr-8 bg-white/10 border border-white/20 rounded-lg text-sm text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-ynab-green font-mono"
+                          className="w-full px-3 py-2 pr-8 bg-white/10 border border-white/20 rounded-lg text-base text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-ynab-green font-mono"
                         />
                         <button
                           type="button"
@@ -1259,7 +1482,7 @@ export default function Home() {
                       <select
                         value={selectedBudgetId}
                         onChange={(e) => selectBudget(e.target.value)}
-                        className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-ynab-green appearance-none cursor-pointer"
+                        className="w-full px-3 py-2 bg-white/10 border border-white/20 rounded-lg text-base text-white focus:outline-none focus:ring-2 focus:ring-ynab-green appearance-none cursor-pointer"
                       >
                         <option value="" className="bg-ynab-purple text-white">— Select a budget —</option>
                         {ynabBudgets.map((b) => (
@@ -1457,107 +1680,125 @@ export default function Home() {
             </div>
 
             {/* Mobile cards */}
-            <div className="md:hidden divide-y divide-ynab-border/60">
-              {convertedData.map((transaction, index) => {
-                const override = overriddenPayees[index];
-                const match = matchResults[index];
-                const isOverridden = override !== undefined;
-                const isMatched = !isOverridden && match && match.confidence >= 0.6;
-                const displayPayee = isOverridden
-                  ? override
-                  : isMatched ? match.payee : transaction.Payee;
-                const tier = match ? getConfidenceTier(match.confidence) : 'none';
-                const isRowSelected = selectedRows.has(index);
-                const dotColor = isOverridden
-                  ? 'bg-ynab-blue'
-                  : tier === 'high' ? 'bg-ynab-green' : tier === 'medium' ? 'bg-amber-400' : 'bg-ynab-border';
-                const tooltipText = isOverridden
-                  ? `Manually set · original: "${transaction.Payee}"`
-                  : tier === 'none' || !match
-                    ? 'No match — tap to set'
-                    : `${tier === 'high' ? 'Matched' : 'Possible'}: "${match.payee}"`;
-                const isEditable = ynabPayees.length > 0;
-                const amount = transaction.Outflow || transaction.Inflow;
-                const isInflow = !!transaction.Inflow;
-                const accountName = resolvedAccountId(transaction)
-                  ? pushAccounts.find(a => a.id === resolvedAccountId(transaction))?.name
-                  : undefined;
-
-                return (
-                  <div
-                    key={index}
-                    className={`px-3 py-3 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/30 opacity-60'}`}
-                  >
-                    <div className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        checked={isRowSelected}
-                        onChange={() => {
-                          setSelectedRows(prev => {
-                            const next = new Set(prev);
-                            if (next.has(index)) { next.delete(index); } else { next.add(index); }
-                            return next;
-                          });
-                        }}
-                        className="mt-1.5 w-5 h-5 rounded border-ynab-border text-ynab-green accent-ynab-green flex-shrink-0"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-start justify-between gap-3">
-                          <button
-                            type="button"
-                            data-payee-cell
-                            onClick={e => handlePayeeClick(e, index)}
-                            disabled={!isEditable}
-                            className="min-w-0 text-left"
-                          >
-                            <div className="flex items-center gap-2">
-                              {matchResults.length > 0 && (
-                                <span title={tooltipText} className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`} />
-                              )}
-                              <span className={`font-semibold truncate ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
-                                {displayPayee}
-                              </span>
-                            </div>
-                            {isMatched && match.payee !== transaction.Payee && (
-                              <p className="text-[11px] text-ynab-muted truncate mt-0.5">← {transaction.Payee}</p>
-                            )}
-                          </button>
-                          <span className={`flex-shrink-0 font-semibold tabular-nums ${isInflow ? 'text-ynab-green' : 'text-foreground'}`}>
-                            {isInflow ? '+' : '−'}{amount}
-                          </span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-ynab-muted">
-                          <input
-                            type="date"
-                            value={transaction.Date}
-                            onChange={e => {
-                              const v = e.target.value;
-                              setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
-                            }}
-                            className="bg-transparent text-[12px] text-ynab-muted font-mono w-[9.6rem] focus:outline-none"
-                          />
-                          {transaction.last4 && <span className="font-mono">*{transaction.last4}</span>}
-                          {accountName && <span className="truncate max-w-[140px]">{accountName}</span>}
-                          {transaction.source === 'sms' && (
-                            <button
-                              type="button"
-                              onClick={() => openFixFormat(index)}
-                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ynab-navy/10 text-ynab-navy"
-                            >
-                              SMS
-                            </button>
-                          )}
-                          {transactionStatuses[index] && (
-                            <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
-                              {getStatusBadge(transactionStatuses[index]).label}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
+            <div className="md:hidden">
+              {groupIndicesByDate(convertedData).map(group => (
+                <div key={group.date || 'none'}>
+                  <div className="px-3 py-1.5 bg-ynab-bg border-y border-ynab-border/70 text-[11px] font-semibold text-ynab-muted tracking-wide">
+                    {formatDateHeader(group.date)}
                   </div>
-                );
-              })}
+                  <div className="divide-y divide-ynab-border/50">
+                    {group.indices.map(index => {
+                      const transaction = convertedData[index];
+                      const override = overriddenPayees[index];
+                      const match = matchResults[index];
+                      const isOverridden = override !== undefined;
+                      const isMatched = !isOverridden && match && match.confidence >= 0.6;
+                      const displayPayee = isOverridden
+                        ? override
+                        : isMatched ? match.payee : transaction.Payee;
+                      const tier = match ? getConfidenceTier(match.confidence) : 'none';
+                      const isRowSelected = selectedRows.has(index);
+                      const dotColor = isOverridden
+                        ? 'bg-ynab-blue'
+                        : tier === 'high' ? 'bg-ynab-green' : tier === 'medium' ? 'bg-amber-400' : 'bg-ynab-border';
+                      const amount = transaction.Outflow || transaction.Inflow;
+                      const isInflow = !!transaction.Inflow;
+                      const accountName = resolvedAccountId(transaction)
+                        ? pushAccounts.find(a => a.id === resolvedAccountId(transaction))?.name
+                        : undefined;
+                      const memoPreview = transaction.source === 'sms'
+                        ? ''
+                        : (transaction.Memo || '').replace(/\s+/g, ' ').trim();
+
+                      return (
+                        <div
+                          key={index}
+                          className={`px-3 py-1.5 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/30 opacity-60'}`}
+                        >
+                          <div className="flex items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={isRowSelected}
+                              onChange={() => {
+                                setSelectedRows(prev => {
+                                  const next = new Set(prev);
+                                  if (next.has(index)) { next.delete(index); } else { next.add(index); }
+                                  return next;
+                                });
+                              }}
+                              className="mt-1 w-4 h-4 rounded border-ynab-border text-ynab-green accent-ynab-green flex-shrink-0"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-start justify-between gap-2">
+                                <button
+                                  type="button"
+                                  data-payee-cell
+                                  onClick={e => handlePayeeClick(e, index)}
+                                  className="min-w-0 text-left"
+                                >
+                                  <div className="flex items-center gap-1.5">
+                                    {matchResults.length > 0 && (
+                                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
+                                    )}
+                                    <span className={`text-[15px] font-semibold leading-tight truncate ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
+                                      {displayPayee || 'Set payee'}
+                                    </span>
+                                  </div>
+                                </button>
+                                <span className={`flex-shrink-0 text-[15px] font-semibold tabular-nums leading-tight ${isInflow ? 'text-ynab-green' : 'text-foreground'}`}>
+                                  {isInflow ? '+' : '−'}AED{amount}
+                                </span>
+                              </div>
+                              <div className="mt-0.5 flex items-center justify-between gap-2">
+                                <button
+                                  type="button"
+                                  data-category-cell
+                                  onClick={e => handleCategoryClick(e, index)}
+                                  className="inline-flex items-center max-w-[60%] min-h-[22px] px-2 py-0.5 rounded-full bg-gray-100 text-[11px] text-gray-600 truncate"
+                                >
+                                  {transaction.categoryName || 'Uncategorized'}
+                                </button>
+                                <span className="text-[11px] text-ynab-muted truncate">
+                                  {accountName || (transaction.last4 ? `*${transaction.last4}` : '')}
+                                </span>
+                              </div>
+                              <div className="mt-0.5 flex items-center gap-2 text-[11px] text-ynab-muted">
+                                <input
+                                  type="date"
+                                  value={transaction.Date}
+                                  onChange={e => {
+                                    const v = e.target.value;
+                                    rememberDate(v);
+                                    setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
+                                  }}
+                                  className="bg-transparent text-base leading-none text-ynab-muted w-[9.8rem] focus:outline-none"
+                                />
+                                {transaction.source === 'sms' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openFixFormat(index)}
+                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ynab-navy/10 text-ynab-navy"
+                                  >
+                                    SMS
+                                  </button>
+                                )}
+                                {transactionStatuses[index] && (
+                                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
+                                    {getStatusBadge(transactionStatuses[index]).label}
+                                  </span>
+                                )}
+                                {memoPreview && (
+                                  <span className="truncate">{memoPreview}</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
             </div>
 
             {/* Desktop table */}
@@ -1576,6 +1817,7 @@ export default function Home() {
                     </th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Category</th>
                     {hasCardColumn && (
                       <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Card</th>
                     )}
@@ -1609,7 +1851,7 @@ export default function Home() {
                         ? 'No match — click to set'
                         : `${tier === 'high' ? 'Matched' : 'Possible'}: "${match.payee}" (${Math.round(match.confidence * 100)}%)`;
 
-                    const isEditable = ynabPayees.length > 0;
+                    const isEditable = true;
 
                     return (
                       <tr
@@ -1640,9 +1882,10 @@ export default function Home() {
                             value={transaction.Date}
                             onChange={e => {
                               const v = e.target.value;
+                              rememberDate(v);
                               setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
                             }}
-                            className="bg-transparent text-ynab-muted text-xs font-mono w-[9.5rem] focus:outline-none focus:text-foreground"
+                            className="bg-transparent text-ynab-muted text-base font-mono w-[10.5rem] focus:outline-none focus:text-foreground"
                           />
                         </td>
                         <td
@@ -1668,6 +1911,17 @@ export default function Home() {
                               </svg>
                             )}
                           </div>
+                        </td>
+                        <td
+                          data-category-cell
+                          onClick={(e) => handleCategoryClick(e, index)}
+                          className="px-3 py-2.5 whitespace-nowrap cursor-pointer"
+                        >
+                          <span className={`inline-flex items-center max-w-[180px] px-2 py-0.5 rounded-full text-[11px] truncate ${
+                            transaction.categoryName ? 'bg-gray-100 text-gray-700' : 'bg-gray-50 text-gray-400'
+                          }`}>
+                            {transaction.categoryName || 'Uncategorized'}
+                          </span>
                         </td>
                         {hasCardColumn && (
                           <td className="px-3 py-2.5 whitespace-nowrap">
@@ -1737,7 +1991,13 @@ export default function Home() {
           payeesLoading={ynabPayeesLoading}
           accounts={pushAccounts}
           accountsLoading={pushAccountsLoading}
-          onChange={setConfirmFields}
+          categories={ynabCategories}
+          categoriesLoading={ynabCategoriesLoading}
+          payeeCategoryMap={payeeCategoryMap}
+          onChange={fields => {
+            setConfirmFields(fields);
+            if (fields.date) rememberDate(fields.date);
+          }}
           onConfirm={confirmSmsFormat}
           onSkip={skipSmsConfirm}
         />
@@ -1994,8 +2254,8 @@ export default function Home() {
         </div>
       )}
 
-      {/* Payee picker */}
-      {editingPayeeIndex !== null && dropdownPos && (
+      {/* Desktop picker */}
+      {editingIndex !== null && dropdownPos && (
         <div
           data-payee-dropdown
           style={{
@@ -2013,43 +2273,75 @@ export default function Home() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
               </svg>
               <input
-                ref={payeeSearchRef}
-                value={payeeSearch}
-                onChange={(e) => setPayeeSearch(e.target.value)}
+                ref={pickerSearchRef}
+                type="text"
+                inputMode="text"
+                autoComplete="off"
+                value={pickerSearch}
+                onChange={(e) => setPickerSearch(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Escape') closePayeeDropdown();
-                  if (e.key === 'Enter' && filteredPayees.length === 1) {
-                    overridePayee(editingPayeeIndex, filteredPayees[0]);
-                    closePayeeDropdown();
+                  if (e.key === 'Escape') closePicker();
+                  const list = editingKind === 'category' ? filteredCategories : filteredPayees;
+                  if (e.key === 'Enter' && list.length === 1) {
+                    if (editingKind === 'category') {
+                      const cat = findCategoryByLabel(ynabCategories, list[0]);
+                      overrideCategory(editingIndex, cat?.id ?? '', cat?.name ?? list[0]);
+                    } else {
+                      overridePayee(editingIndex, list[0]);
+                    }
+                    closePicker();
                   }
                 }}
-                placeholder="Search payees…"
-                className="w-full pl-7 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                placeholder={editingKind === 'category' ? 'Search categories…' : 'Search payees…'}
+                className="w-full pl-7 pr-3 py-1.5 text-base border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               />
             </div>
           </div>
-          <div className="max-h-52 overflow-y-auto py-1 payee-scroll">
-            {filteredPayees.length > 0 ? (
-              filteredPayees.map((payee) => {
+          <div className="max-h-52 overflow-y-auto py-0.5 payee-scroll">
+            {editingKind === 'category' && (
+              <button
+                type="button"
+                onClick={() => {
+                  overrideCategory(editingIndex, '', '');
+                  closePicker();
+                }}
+                className="w-full min-h-[36px] text-left px-3 py-1.5 text-sm text-gray-500 hover:bg-gray-50"
+              >
+                Uncategorized
+              </button>
+            )}
+            {(editingKind === 'category' ? filteredCategories : filteredPayees).length > 0 ? (
+              (editingKind === 'category' ? filteredCategories : filteredPayees).map((option) => {
+                const currentPayee =
+                  overriddenPayees[editingIndex] ??
+                  (matchResults[editingIndex]?.confidence >= 0.6
+                    ? matchResults[editingIndex]?.payee
+                    : convertedData[editingIndex]?.Payee);
+                const currentCat = convertedData[editingIndex]?.categoryName;
                 const isCurrent =
-                  (overriddenPayees[editingPayeeIndex] ?? '') === payee ||
-                  (!overriddenPayees[editingPayeeIndex] &&
-                    matchResults[editingPayeeIndex]?.confidence >= 0.6 &&
-                    matchResults[editingPayeeIndex]?.payee === payee);
+                  editingKind === 'category'
+                    ? option === currentCat || option.endsWith(` · ${currentCat}`)
+                    : option === currentPayee;
                 return (
                   <button
-                    key={payee}
+                    key={option}
+                    type="button"
                     onClick={() => {
-                      overridePayee(editingPayeeIndex, payee);
-                      closePayeeDropdown();
+                      if (editingKind === 'category') {
+                        const cat = findCategoryByLabel(ynabCategories, option);
+                        overrideCategory(editingIndex, cat?.id ?? '', cat?.name ?? option);
+                      } else {
+                        overridePayee(editingIndex, option);
+                      }
+                      closePicker();
                     }}
-                    className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center justify-between gap-2 ${
+                    className={`w-full min-h-[36px] text-left px-3 py-1.5 text-sm transition-colors flex items-center justify-between gap-2 ${
                       isCurrent
                         ? 'bg-indigo-50 text-indigo-700 font-medium'
                         : 'text-gray-700 hover:bg-gray-50'
                     }`}
                   >
-                    <span>{payee}</span>
+                    <span className="truncate">{option}</span>
                     {isCurrent && (
                       <svg className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                         <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -2059,84 +2351,66 @@ export default function Home() {
                 );
               })
             ) : (
-              <p className="px-3 py-3 text-sm text-gray-400 text-center">No payees found</p>
+              <p className="px-3 py-3 text-sm text-gray-400 text-center">
+                {editingKind === 'category' ? 'No categories found' : 'No payees found'}
+              </p>
             )}
           </div>
           <div className="px-3 py-2 border-t border-gray-100 flex items-center justify-between">
-            <span className="text-xs text-gray-400">{ynabPayees.length} payees total</span>
-            <button onClick={closePayeeDropdown} className="text-xs text-gray-400 hover:text-gray-600">
+            <span className="text-xs text-gray-400">
+              {editingKind === 'category' ? `${ynabCategories.length} categories` : `${ynabPayees.length} payees total`}
+            </span>
+            <button type="button" onClick={closePicker} className="text-xs text-gray-400 hover:text-gray-600">
               Cancel (Esc)
             </button>
           </div>
         </div>
       )}
 
-      {editingPayeeIndex !== null && !dropdownPos && (
-        <div className="fixed inset-0 bg-black/50 z-[200] flex items-end" onClick={closePayeeDropdown}>
-          <div
-            data-payee-dropdown
-            onClick={e => e.stopPropagation()}
-            className="bg-white rounded-t-2xl shadow-2xl w-full max-h-[80vh] flex flex-col"
-          >
-            <div className="px-5 pt-4 pb-3 border-b border-gray-100">
-              <h3 className="text-base font-semibold text-gray-900">Payee</h3>
-              <div className="relative mt-3">
-                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-                <input
-                  ref={payeeSearchRef}
-                  value={payeeSearch}
-                  onChange={(e) => setPayeeSearch(e.target.value)}
-                  placeholder="Search payees…"
-                  className="w-full min-h-[44px] pl-9 pr-3 py-2.5 text-base border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-ynab-green"
-                />
-              </div>
-            </div>
-            <div className="overflow-y-auto py-1 payee-scroll">
-              {filteredPayees.length > 0 ? (
-                filteredPayees.map((payee) => {
-                  const isCurrent =
-                    (overriddenPayees[editingPayeeIndex] ?? '') === payee ||
-                    (!overriddenPayees[editingPayeeIndex] &&
-                      matchResults[editingPayeeIndex]?.confidence >= 0.6 &&
-                      matchResults[editingPayeeIndex]?.payee === payee);
-                  return (
-                    <button
-                      key={payee}
-                      type="button"
-                      onClick={() => {
-                        overridePayee(editingPayeeIndex, payee);
-                        closePayeeDropdown();
-                      }}
-                      className={`w-full min-h-[48px] text-left px-5 py-3 text-base transition-colors flex items-center justify-between gap-2 ${
-                        isCurrent ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-800 active:bg-gray-50'
-                      }`}
-                    >
-                      <span>{payee}</span>
-                      {isCurrent && (
-                        <svg className="w-5 h-5 text-indigo-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                        </svg>
-                      )}
-                    </button>
-                  );
-                })
-              ) : (
-                <p className="px-5 py-6 text-sm text-gray-400 text-center">No payees found</p>
-              )}
-            </div>
-            <div className="px-5 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-gray-100">
-              <button
-                type="button"
-                onClick={closePayeeDropdown}
-                className="w-full min-h-[48px] rounded-xl border border-gray-300 text-sm font-medium text-gray-700"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
+      {editingIndex !== null && !dropdownPos && editingKind === 'payee' && (
+        <PickerSheet
+          title="Payee"
+          query={pickerSearch}
+          onQuery={setPickerSearch}
+          options={filteredPayees}
+          current={
+            overriddenPayees[editingIndex] ??
+            (matchResults[editingIndex]?.confidence >= 0.6
+              ? matchResults[editingIndex]?.payee
+              : convertedData[editingIndex]?.Payee)
+          }
+          onSelect={name => overridePayee(editingIndex, name)}
+          onClose={closePicker}
+          inputRef={pickerSearchRef}
+          allowCustom
+          emptyLabel={ynabPayees.length ? 'No payees found' : 'Type a payee name'}
+        />
+      )}
+
+      {editingIndex !== null && !dropdownPos && editingKind === 'category' && (
+        <PickerSheet
+          title="Category"
+          query={pickerSearch}
+          onQuery={setPickerSearch}
+          options={filteredCategories}
+          current={
+            findCategoryById(ynabCategories, convertedData[editingIndex]?.categoryId)
+              ? categoryLabel(findCategoryById(ynabCategories, convertedData[editingIndex]?.categoryId) as YnabCategory)
+              : convertedData[editingIndex]?.categoryName
+          }
+          onSelect={label => {
+            if (!label) {
+              overrideCategory(editingIndex, '', '');
+              return;
+            }
+            const cat = findCategoryByLabel(ynabCategories, label);
+            overrideCategory(editingIndex, cat?.id ?? '', cat?.name ?? label);
+          }}
+          onClose={closePicker}
+          inputRef={pickerSearchRef}
+          allowEmpty
+          emptyLabel={ynabCategories.length ? 'No categories found' : 'Connect YNAB to pick a category'}
+        />
       )}
 
       {/* Toast */}
