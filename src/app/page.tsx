@@ -974,10 +974,11 @@ export default function Home() {
   }, [draftReady, convertedData, transactionStatuses, selectedRows, overriddenPayees, fileName]);
 
   useEffect(() => {
-    if (!confirmQueue.length || !ynabConnected || !selectedBudgetId || !ynabApiKey) return;
+    if (!ynabConnected || !selectedBudgetId || !ynabApiKey) return;
     if (pushAccounts.length > 0) return;
+    if (convertedData.length === 0 && confirmQueue.length === 0) return;
     fetchYnabAccounts(selectedBudgetId, ynabApiKey);
-  }, [confirmQueue.length, ynabConnected, selectedBudgetId, ynabApiKey, fetchYnabAccounts, pushAccounts.length]);
+  }, [confirmQueue.length, convertedData.length, ynabConnected, selectedBudgetId, ynabApiKey, fetchYnabAccounts, pushAccounts.length]);
 
   // Auto-connect and restore last budget on mount
   useEffect(() => {
@@ -1368,9 +1369,14 @@ export default function Home() {
 
   const selectedBudget = ynabBudgets.find(b => b.id === selectedBudgetId);
   const allSelected = convertedData.length > 0 && selectedRows.size === convertedData.length;
-  const hasCardColumn = convertedData.some(t => t.last4);
+  const hasAccountColumn = convertedData.some(t => t.last4 || t.accountId);
   const resolvedAccountId = (t: YNABTransaction) =>
     t.accountId || (t.last4 ? cardAccounts[t.last4] : undefined);
+  const resolvedAccountName = (t: YNABTransaction) => {
+    const id = resolvedAccountId(t);
+    if (!id) return '';
+    return pushAccounts.find(a => a.id === id)?.name ?? '';
+  };
   const selectedForPush = convertedData.filter((_, i) => selectedRows.has(i));
   const pushUnmappedLast4 = [
     ...new Set(
@@ -1683,10 +1689,10 @@ export default function Home() {
             <div className="md:hidden">
               {groupIndicesByDate(convertedData).map(group => (
                 <div key={group.date || 'none'}>
-                  <div className="px-3 py-1.5 bg-ynab-bg border-y border-ynab-border/70 text-[11px] font-semibold text-ynab-muted tracking-wide">
+                  <div className="px-3 py-1.5 bg-ynab-bg text-[11px] font-medium text-ynab-muted">
                     {formatDateHeader(group.date)}
                   </div>
-                  <div className="divide-y divide-ynab-border/50">
+                  <div className="divide-y divide-ynab-border/40 bg-white">
                     {group.indices.map(index => {
                       const transaction = convertedData[index];
                       const override = overriddenPayees[index];
@@ -1696,16 +1702,11 @@ export default function Home() {
                       const displayPayee = isOverridden
                         ? override
                         : isMatched ? match.payee : transaction.Payee;
-                      const tier = match ? getConfidenceTier(match.confidence) : 'none';
                       const isRowSelected = selectedRows.has(index);
-                      const dotColor = isOverridden
-                        ? 'bg-ynab-blue'
-                        : tier === 'high' ? 'bg-ynab-green' : tier === 'medium' ? 'bg-amber-400' : 'bg-ynab-border';
                       const amount = transaction.Outflow || transaction.Inflow;
                       const isInflow = !!transaction.Inflow;
-                      const accountName = resolvedAccountId(transaction)
-                        ? pushAccounts.find(a => a.id === resolvedAccountId(transaction))?.name
-                        : undefined;
+                      const accountName = resolvedAccountName(transaction);
+                      const category = transaction.categoryName;
                       const memoPreview = transaction.source === 'sms'
                         ? ''
                         : (transaction.Memo || '').replace(/\s+/g, ' ').trim();
@@ -1713,9 +1714,9 @@ export default function Home() {
                       return (
                         <div
                           key={index}
-                          className={`px-3 py-1.5 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/30 opacity-60'}`}
+                          className={`px-3 py-2 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/40 opacity-55'}`}
                         >
-                          <div className="flex items-start gap-2">
+                          <div className="flex gap-2.5">
                             <input
                               type="checkbox"
                               checked={isRowSelected}
@@ -1726,70 +1727,74 @@ export default function Home() {
                                   return next;
                                 });
                               }}
-                              className="mt-1 w-4 h-4 rounded border-ynab-border text-ynab-green accent-ynab-green flex-shrink-0"
+                              className="mt-[3px] w-[15px] h-[15px] rounded-[4px] border-ynab-border text-ynab-green accent-ynab-green flex-shrink-0"
                             />
                             <div className="min-w-0 flex-1">
-                              <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-baseline justify-between gap-3">
                                 <button
                                   type="button"
                                   data-payee-cell
                                   onClick={e => handlePayeeClick(e, index)}
-                                  className="min-w-0 text-left"
+                                  className="min-w-0 text-left text-[14px] font-medium leading-snug text-foreground truncate"
                                 >
-                                  <div className="flex items-center gap-1.5">
-                                    {matchResults.length > 0 && (
-                                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
-                                    )}
-                                    <span className={`text-[15px] font-semibold leading-tight truncate ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
-                                      {displayPayee || 'Set payee'}
-                                    </span>
-                                  </div>
+                                  {displayPayee || 'Set payee'}
                                 </button>
-                                <span className={`flex-shrink-0 text-[15px] font-semibold tabular-nums leading-tight ${isInflow ? 'text-ynab-green' : 'text-foreground'}`}>
-                                  {isInflow ? '+' : '−'}AED{amount}
+                                <span className={`flex-shrink-0 text-[14px] font-semibold tabular-nums leading-snug ${isInflow ? 'text-ynab-green' : 'text-foreground'}`}>
+                                  {isInflow ? '+' : '−'}AED {amount}
                                 </span>
                               </div>
-                              <div className="mt-0.5 flex items-center justify-between gap-2">
-                                <button
-                                  type="button"
-                                  data-category-cell
-                                  onClick={e => handleCategoryClick(e, index)}
-                                  className="inline-flex items-center max-w-[60%] min-h-[22px] px-2 py-0.5 rounded-full bg-gray-100 text-[11px] text-gray-600 truncate"
-                                >
-                                  {transaction.categoryName || 'Uncategorized'}
-                                </button>
-                                <span className="text-[11px] text-ynab-muted truncate">
-                                  {accountName || (transaction.last4 ? `*${transaction.last4}` : '')}
-                                </span>
-                              </div>
-                              <div className="mt-0.5 flex items-center gap-2 text-[11px] text-ynab-muted">
-                                <input
-                                  type="date"
-                                  value={transaction.Date}
-                                  onChange={e => {
-                                    const v = e.target.value;
-                                    rememberDate(v);
-                                    setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
-                                  }}
-                                  className="bg-transparent text-base leading-none text-ynab-muted w-[9.8rem] focus:outline-none"
-                                />
-                                {transaction.source === 'sms' && (
+                              <div className="mt-1 flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5 min-w-0">
                                   <button
                                     type="button"
-                                    onClick={() => openFixFormat(index)}
-                                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ynab-navy/10 text-ynab-navy"
+                                    data-category-cell
+                                    onClick={e => handleCategoryClick(e, index)}
+                                    className={`inline-flex items-center max-w-[52%] h-5 px-1.5 rounded-full text-[10px] leading-none truncate ${
+                                      category
+                                        ? 'bg-gray-100 text-gray-600'
+                                        : 'bg-transparent text-ynab-muted ring-1 ring-inset ring-ynab-border'
+                                    }`}
                                   >
-                                    SMS
+                                    {category || 'Uncategorized'}
                                   </button>
-                                )}
-                                {transactionStatuses[index] && (
-                                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
-                                    {getStatusBadge(transactionStatuses[index]).label}
-                                  </span>
-                                )}
-                                {memoPreview && (
-                                  <span className="truncate">{memoPreview}</span>
-                                )}
+                                  <label className="relative w-5 h-5 flex-shrink-0 text-ynab-muted/80">
+                                    <svg className="w-3.5 h-3.5 m-[3px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                    </svg>
+                                    <input
+                                      type="date"
+                                      value={transaction.Date}
+                                      aria-label="Change date"
+                                      onChange={e => {
+                                        const v = e.target.value;
+                                        rememberDate(v);
+                                        setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
+                                      }}
+                                      className="absolute inset-0 opacity-0 cursor-pointer"
+                                      style={{ fontSize: 16 }}
+                                    />
+                                  </label>
+                                  {transaction.source === 'sms' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => openFixFormat(index)}
+                                      className="text-[10px] font-medium text-ynab-muted"
+                                    >
+                                      SMS
+                                    </button>
+                                  )}
+                                  {transactionStatuses[index] && (
+                                    <span className={`inline-flex items-center h-5 px-1.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
+                                      {getStatusBadge(transactionStatuses[index]).label}
+                                    </span>
+                                  )}
+                                  {memoPreview && (
+                                    <span className="text-[10px] text-ynab-muted truncate">{memoPreview}</span>
+                                  )}
+                                </div>
+                                <span className={`text-[11px] leading-none truncate max-w-[40%] ${accountName ? 'text-ynab-muted' : 'text-ynab-border'}`}>
+                                  {accountName || (transaction.last4 || transaction.accountId ? 'Unmapped' : '')}
+                                </span>
                               </div>
                             </div>
                           </div>
@@ -1818,8 +1823,8 @@ export default function Home() {
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Category</th>
-                    {hasCardColumn && (
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Card</th>
+                    {hasAccountColumn && (
+                      <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Account</th>
                     )}
                     <th className="px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Memo</th>
                     <th className="px-3 py-2 text-right text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Outflow</th>
@@ -1852,6 +1857,7 @@ export default function Home() {
                         : `${tier === 'high' ? 'Matched' : 'Possible'}: "${match.payee}" (${Math.round(match.confidence * 100)}%)`;
 
                     const isEditable = true;
+                    const accountName = resolvedAccountName(transaction);
 
                     return (
                       <tr
@@ -1923,12 +1929,14 @@ export default function Home() {
                             {transaction.categoryName || 'Uncategorized'}
                           </span>
                         </td>
-                        {hasCardColumn && (
+                        {hasAccountColumn && (
                           <td className="px-3 py-2.5 whitespace-nowrap">
-                            {transaction.last4 ? (
-                              <span className="text-[11px] font-mono text-ynab-muted">*{transaction.last4}</span>
+                            {accountName ? (
+                              <span className="text-[11px] text-ynab-muted truncate max-w-[160px] inline-block align-bottom">
+                                {accountName}
+                              </span>
                             ) : (
-                              <span className="text-[11px] text-ynab-border">—</span>
+                              <span className="text-[11px] text-ynab-border">Unmapped</span>
                             )}
                           </td>
                         )}
