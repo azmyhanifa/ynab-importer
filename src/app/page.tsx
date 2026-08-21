@@ -1362,21 +1362,22 @@ export default function Home() {
     const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
     const spaceBelow = window.innerHeight - rect.bottom - margin;
     const spaceAbove = rect.top - margin;
-    const preferred = 320;
-    const placeAbove = spaceBelow < Math.min(preferred, 240) && spaceAbove > spaceBelow;
+    const preferred = 280;
+    const placeAbove = spaceBelow < 200 && spaceAbove > spaceBelow;
+    const maxHeight = Math.min(preferred, Math.max(180, placeAbove ? spaceAbove : spaceBelow));
     setDropdownPos(
       placeAbove
         ? {
             bottom: window.innerHeight - rect.top + gap,
             left,
             width,
-            maxHeight: Math.max(160, spaceAbove),
+            maxHeight,
           }
         : {
             top: rect.bottom + gap,
             left,
             width,
-            maxHeight: Math.max(160, spaceBelow),
+            maxHeight,
           },
     );
     requestAnimationFrame(() => pickerSearchRef.current?.focus());
