@@ -46,7 +46,7 @@ export default function ClipboardPasteButton({
   };
 
   const buttonClass = compact
-    ? 'inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-xs font-semibold rounded-md border border-ynab-border text-foreground hover:bg-ynab-bg disabled:opacity-40 transition-colors whitespace-nowrap min-h-[44px] sm:min-h-0'
+    ? 'inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-[13px] sm:text-xs font-semibold rounded-lg border border-ynab-border text-foreground hover:bg-ynab-bg disabled:opacity-40 transition-colors whitespace-nowrap min-h-[44px] sm:min-h-0'
     : 'inline-flex items-center justify-center px-4 py-2.5 sm:py-2 text-sm font-semibold rounded-md border border-ynab-border text-ynab-navy bg-white hover:bg-ynab-bg disabled:opacity-40 transition-colors whitespace-nowrap min-h-[44px]';
 
   return (

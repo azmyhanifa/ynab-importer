@@ -7,6 +7,7 @@ import { matchAll, findBestMatch, type MatchResult, getConfidenceTier } from './
 import {
   compileTemplate,
   guessSms,
+  isPlausibleSms,
   matchTemplate,
   smsContainsPayee,
   splitSmsMessages,
@@ -108,6 +109,44 @@ function formatDateHeader(iso: string): string {
   });
 }
 
+function formatShortDate(iso: string): string {
+  if (!iso) return 'Date';
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || !m || !d) return iso;
+  const date = new Date(y, m - 1, d);
+  if (isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    ...(y !== new Date().getFullYear() ? { year: '2-digit' as const } : {}),
+  });
+}
+
+function DateChip({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="relative inline-flex items-center gap-1 h-7 flex-shrink-0 px-2.5 rounded-full bg-gray-100 text-gray-600 text-xs font-medium leading-none cursor-pointer active:bg-gray-200">
+      <svg className="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+      </svg>
+      <span>{formatShortDate(value)}</span>
+      <input
+        type="date"
+        value={value}
+        aria-label="Change date"
+        onChange={e => onChange(e.target.value)}
+        className="absolute inset-0 opacity-0 cursor-pointer"
+        style={{ fontSize: 16 }}
+      />
+    </label>
+  );
+}
+
 function groupIndicesByDate(data: YNABTransaction[]): { date: string; indices: number[] }[] {
   const map = new Map<string, number[]>();
   data.forEach((t, i) => {
@@ -121,7 +160,7 @@ function groupIndicesByDate(data: YNABTransaction[]): { date: string; indices: n
     .map(([date, indices]) => ({ date, indices }));
 }
 
-function ingestToastMessage(added: number, pending: number): string | null {
+function ingestToastMessage(added: number, pending: number, rejected = 0): string | null {
   if (added && pending) {
     return `Added ${added} from clipboard · ${pending} need${pending === 1 ? 's' : ''} format confirm`;
   }
@@ -130,6 +169,9 @@ function ingestToastMessage(added: number, pending: number): string | null {
   }
   if (pending) {
     return pending === 1 ? '1 needs format confirm' : `${pending} need format confirm`;
+  }
+  if (rejected) {
+    return "Couldn't understand that format";
   }
   return null;
 }
@@ -485,14 +527,20 @@ export default function Home() {
 
     const autoRows: YNABTransaction[] = [];
     const needsConfirm: { raw: string; guess: SmsGuess }[] = [];
+    let rejected = 0;
 
     for (const raw of messages) {
       const matched = matchTemplate(raw, smsTemplates, fallbackDate);
       if (matched) {
         autoRows.push(fieldsToRow(matched.fields, raw));
-      } else {
-        needsConfirm.push({ raw, guess: guessSms(raw, fallbackDate) });
+        continue;
       }
+      const guess = guessSms(raw, fallbackDate);
+      if (!isPlausibleSms(raw, guess)) {
+        rejected += 1;
+        continue;
+      }
+      needsConfirm.push({ raw, guess });
     }
 
     if (autoRows.length) {
@@ -514,7 +562,7 @@ export default function Home() {
       setFixRowIndex(null);
     }
 
-    const toast = ingestToastMessage(autoRows.length, needsConfirm.length);
+    const toast = ingestToastMessage(autoRows.length, needsConfirm.length, rejected);
     if (toast) displayToast(toast);
   }, [smsTemplates, fieldsToRow, appendSmsRows, ynabPayees, cardAccounts, ynabCategories, payeeCategoryMap, lastSmsDate, rememberDate]);
 
@@ -1327,7 +1375,7 @@ export default function Home() {
     return () => document.removeEventListener('mousedown', handler);
   }, [showYnabMenu]);
 
-  // Close dropdown on outside click or scroll
+  // Close dropdown on outside click or scroll (desktop popover only — mobile sheet handles its own dismiss)
   useEffect(() => {
     if (editingIndex === null) return;
     const handleClickOutside = (e: MouseEvent) => {
@@ -1336,17 +1384,20 @@ export default function Home() {
         closePicker();
       }
     };
+    document.addEventListener('mousedown', handleClickOutside);
+    if (!dropdownPos) {
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
     const handleScroll = (e: Event) => {
       if ((e.target as Element | null)?.closest?.('[data-payee-dropdown]')) return;
       closePicker();
     };
-    document.addEventListener('mousedown', handleClickOutside);
     window.addEventListener('scroll', handleScroll, true);
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
       window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [editingIndex, closePicker]);
+  }, [editingIndex, dropdownPos, closePicker]);
 
   const filteredPayees = useMemo(() => {
     const q = pickerSearch.trim().toLowerCase();
@@ -1433,6 +1484,16 @@ export default function Home() {
     selectedRows.size > 0 &&
     pushUnmappedLast4.length === 0 &&
     (!pushNeedsDefaultAccount || !!selectedPushAccountId);
+
+  let matchHigh = 0;
+  let matchMedium = 0;
+  let matchNone = 0;
+  for (const r of matchResults) {
+    const tier = getConfidenceTier(r.confidence);
+    if (tier === 'high') matchHigh += 1;
+    else if (tier === 'medium') matchMedium += 1;
+    else matchNone += 1;
+  }
 
   return (
     <div className="min-h-screen bg-ynab-bg">
@@ -1633,13 +1694,13 @@ export default function Home() {
           </div>
         )}
 
-        {/* Transactions table */}
+        {/* Transactions */}
         {convertedData.length > 0 && !isProcessing && (
-          <div className={`bg-white rounded-lg border transition-all duration-150 overflow-hidden ${isDragOver ? 'border-ynab-green ring-2 ring-ynab-green/20' : 'border-ynab-border'}`}>
+          <div className="relative">
 
             {/* Drop-to-replace overlay */}
             {isDragOver && (
-              <div className="absolute inset-0 z-10 bg-ynab-green/5 flex items-center justify-center pointer-events-none rounded-lg">
+              <div className="absolute inset-0 z-10 bg-ynab-green/5 flex items-center justify-center pointer-events-none rounded-xl">
                 <div className="bg-white border-2 border-ynab-green rounded-xl px-6 py-4 shadow-lg text-center">
                   <svg className="mx-auto h-6 w-6 text-ynab-green mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
@@ -1649,64 +1710,53 @@ export default function Home() {
               </div>
             )}
 
-            {/* Table toolbar */}
-            <div className="px-3 sm:px-4 py-3 border-b border-ynab-border flex flex-col gap-3">
-              <div className="min-w-0">
-                {/* File info */}
-                <div className="flex items-center gap-2 mb-1">
-                  <svg className="w-3.5 h-3.5 text-ynab-muted flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                  <span className="text-xs text-ynab-muted truncate">{fileName}</span>
-                  <label htmlFor="file-replace" className="text-xs text-ynab-blue hover:underline cursor-pointer flex-shrink-0">
-                    Change
-                  </label>
-                  <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-replace" />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setConvertedData([]);
-                      setTransactionStatuses([]);
-                      setSelectedRows(new Set());
-                      setOverriddenPayees({});
-                      setMatchResults([]);
-                      setFileName('');
-                    }}
-                    className="text-xs text-ynab-muted hover:text-red-600 hover:underline flex-shrink-0"
-                  >
-                    Clear
-                  </button>
+            {/* Toolbar card */}
+            <div className={`bg-white rounded-xl border px-4 py-4 flex flex-col gap-4 ${isDragOver ? 'border-ynab-green ring-2 ring-ynab-green/20' : 'border-ynab-border'}`}>
+              <div className="flex items-start justify-between gap-3 min-w-0">
+                <div className="min-w-0">
+                  <p className="text-[15px] font-semibold tracking-tight text-foreground truncate">{fileName}</p>
+                  <p className="mt-1 text-[13px] text-ynab-muted">
+                    <span className="font-semibold text-foreground">{selectedRows.size}</span>
+                    {' '}of {convertedData.length} selected
+                  </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span className="text-sm font-semibold text-foreground">
-                    {selectedRows.size} <span className="font-normal text-ynab-muted">of {convertedData.length}</span>
-                  </span>
-                  {matchResults.length > 0 && (() => {
-                    const high = matchResults.filter(r => getConfidenceTier(r.confidence) === 'high').length;
-                    const medium = matchResults.filter(r => getConfidenceTier(r.confidence) === 'medium').length;
-                    const none = matchResults.filter(r => getConfidenceTier(r.confidence) === 'none').length;
-                    return (
-                      <div className="flex items-center gap-2.5">
-                        <span className="flex items-center gap-1 text-[11px] text-ynab-muted">
-                          <span className="w-1.5 h-1.5 rounded-full bg-ynab-green" />{high} matched
-                        </span>
-                        <span className="flex items-center gap-1 text-[11px] text-ynab-muted">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />{medium} possible
-                        </span>
-                        <span className="flex items-center gap-1 text-[11px] text-ynab-muted">
-                          <span className="w-1.5 h-1.5 rounded-full bg-ynab-border" />{none} unmatched
-                        </span>
-                      </div>
-                    );
-                  })()}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConvertedData([]);
+                    setTransactionStatuses([]);
+                    setSelectedRows(new Set());
+                    setOverriddenPayees({});
+                    setMatchResults([]);
+                    setFileName('');
+                  }}
+                  className="text-[13px] font-medium text-ynab-muted hover:text-red-600 flex-shrink-0 px-1 -mr-1 py-1"
+                >
+                  Clear
+                </button>
               </div>
+              {matchResults.length > 0 && (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px] text-ynab-muted">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-ynab-green" />
+                    {matchHigh} matched
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    {matchMedium} possible
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-ynab-border" />
+                    {matchNone} unmatched
+                  </span>
+                </div>
+              )}
               <div className={`grid gap-2 sm:flex sm:flex-wrap ${ynabConnected && selectedBudgetId ? 'grid-cols-3' : 'grid-cols-2'}`}>
                 <ClipboardPasteButton compact onPasteText={ingestSmsText} className="w-full sm:w-auto" />
                 <button
                   onClick={downloadCSV}
                   disabled={selectedRows.size === 0}
-                  className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-xs font-semibold rounded-md border border-ynab-border text-foreground hover:bg-ynab-bg disabled:opacity-40 transition-colors whitespace-nowrap min-h-[44px] sm:min-h-0"
+                  className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-[13px] sm:text-xs font-semibold rounded-lg border border-ynab-border text-foreground hover:bg-ynab-bg disabled:opacity-40 transition-colors whitespace-nowrap min-h-[44px] sm:min-h-0"
                 >
                   <svg className="w-3.5 h-3.5 mr-1.5 text-ynab-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -1718,7 +1768,7 @@ export default function Home() {
                   <button
                     onClick={openPushModal}
                     disabled={selectedRows.size === 0}
-                    className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-xs font-semibold rounded-md text-white bg-ynab-green hover:brightness-110 disabled:opacity-40 transition-all whitespace-nowrap min-h-[44px] sm:min-h-0"
+                    className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-[13px] sm:text-xs font-semibold rounded-lg text-white bg-ynab-green hover:brightness-110 disabled:opacity-40 transition-all whitespace-nowrap min-h-[44px] sm:min-h-0"
                   >
                     <svg className="w-3.5 h-3.5 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
@@ -1731,13 +1781,13 @@ export default function Home() {
             </div>
 
             {/* Mobile cards */}
-            <div className="md:hidden">
+            <div className="md:hidden mt-2">
               {groupIndicesByDate(convertedData).map(group => (
-                <div key={group.date || 'none'}>
-                  <div className="px-3 py-1.5 bg-ynab-bg text-[11px] font-medium text-ynab-muted">
+                <div key={group.date || 'none'} className="mt-3 first:mt-2">
+                  <div className="px-1 pb-2 text-[13px] font-medium text-ynab-muted">
                     {formatDateHeader(group.date)}
                   </div>
-                  <div className="divide-y divide-ynab-border/40 bg-white">
+                  <div className="space-y-2">
                     {group.indices.map(index => {
                       const transaction = convertedData[index];
                       const override = overriddenPayees[index];
@@ -1759,9 +1809,13 @@ export default function Home() {
                       return (
                         <div
                           key={index}
-                          className={`px-3 py-2 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/40 opacity-55'}`}
+                          className={`rounded-xl border px-3 py-2.5 ${
+                            isRowSelected
+                              ? 'bg-white border-ynab-border'
+                              : 'bg-white border-ynab-border/70 opacity-55'
+                          }`}
                         >
-                          <div className="flex gap-2.5">
+                          <div className="flex items-center gap-3">
                             <input
                               type="checkbox"
                               checked={isRowSelected}
@@ -1772,72 +1826,59 @@ export default function Home() {
                                   return next;
                                 });
                               }}
-                              className="mt-[3px] w-[15px] h-[15px] rounded-[4px] border-ynab-border text-ynab-green accent-ynab-green flex-shrink-0"
+                              className="w-[18px] h-[18px] rounded-[4px] border-ynab-border text-ynab-green accent-ynab-green flex-shrink-0"
                             />
                             <div className="min-w-0 flex-1">
-                              <div className="flex items-baseline justify-between gap-3">
+                              <div className="flex items-center justify-between gap-3">
                                 <button
                                   type="button"
                                   data-payee-cell
                                   onClick={e => handlePayeeClick(e, index)}
-                                  className="min-w-0 text-left text-[14px] font-medium leading-snug text-foreground truncate"
+                                  className="min-w-0 flex-1 overflow-hidden flex items-center gap-0.5 text-left text-[15px] font-semibold leading-snug text-foreground rounded-md py-0.5 active:bg-ynab-bg"
+                                  aria-label={displayPayee ? `Change payee, currently ${displayPayee}` : 'Set payee'}
                                 >
-                                  {displayPayee || 'Set payee'}
+                                  <span className={`truncate ${displayPayee ? '' : 'text-ynab-muted'}`}>
+                                    {displayPayee || 'Set payee'}
+                                  </span>
+                                  <svg className="w-4 h-4 text-ynab-muted/80 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                  </svg>
                                 </button>
-                                <span className={`flex-shrink-0 text-[14px] font-semibold tabular-nums leading-snug ${isInflow ? 'text-ynab-green' : 'text-foreground'}`}>
+                                <span className={`flex-shrink-0 text-[15px] font-semibold tabular-nums leading-snug ${isInflow ? 'text-ynab-green' : 'text-foreground'}`}>
                                   {isInflow ? '+' : '−'}AED {amount}
                                 </span>
                               </div>
-                              <div className="mt-1 flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5 min-w-0">
+                              <div className="mt-1.5 flex items-center justify-between gap-2">
+                                <div className="flex flex-wrap items-center gap-1.5 min-w-0 flex-1">
                                   <button
                                     type="button"
                                     data-category-cell
                                     onClick={e => handleCategoryClick(e, index)}
-                                    className={`inline-flex items-center max-w-[52%] h-5 px-1.5 rounded-full text-[10px] leading-none truncate ${
+                                    className={`inline-flex items-center max-w-full min-h-[28px] px-2.5 rounded-full text-xs font-medium leading-none ${
                                       category
-                                        ? 'bg-gray-100 text-gray-600'
+                                        ? 'bg-gray-100 text-gray-700'
                                         : 'bg-transparent text-ynab-muted ring-1 ring-inset ring-ynab-border'
                                     }`}
                                   >
-                                    {category || 'Uncategorized'}
+                                    <span className="truncate">{category || 'Uncategorized'}</span>
                                   </button>
-                                  <label className="relative w-5 h-5 flex-shrink-0 text-ynab-muted/80">
-                                    <svg className="w-3.5 h-3.5 m-[3px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                    </svg>
-                                    <input
-                                      type="date"
-                                      value={transaction.Date}
-                                      aria-label="Change date"
-                                      onChange={e => {
-                                        const v = e.target.value;
-                                        rememberDate(v);
-                                        setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
-                                      }}
-                                      className="absolute inset-0 opacity-0 cursor-pointer"
-                                      style={{ fontSize: 16 }}
-                                    />
-                                  </label>
-                                  {transaction.source === 'sms' && (
-                                    <button
-                                      type="button"
-                                      onClick={() => openFixFormat(index)}
-                                      className="text-[10px] font-medium text-ynab-muted"
-                                    >
-                                      SMS
-                                    </button>
-                                  )}
+                                  <DateChip
+                                    value={transaction.Date}
+                                    onChange={v => {
+                                      rememberDate(v);
+                                      setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
+                                    }}
+                                  />
                                   {transactionStatuses[index] && (
-                                    <span className={`inline-flex items-center h-5 px-1.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
+                                    <span className={`inline-flex items-center h-7 px-2 rounded-full text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
                                       {getStatusBadge(transactionStatuses[index]).label}
                                     </span>
                                   )}
                                   {memoPreview && (
-                                    <span className="text-[10px] text-ynab-muted truncate">{memoPreview}</span>
+                                    <span className="text-[11px] text-ynab-muted truncate">{memoPreview}</span>
                                   )}
                                 </div>
-                                <span className={`text-[11px] leading-none truncate max-w-[40%] ${accountName ? 'text-ynab-muted' : 'text-ynab-border'}`}>
+                                <span className={`text-[11px] leading-none truncate max-w-[6.75rem] flex-shrink-0 ${accountName ? 'text-ynab-muted' : 'text-ynab-border'}`}>
                                   {accountName || (transaction.last4 || transaction.accountId ? 'Unmapped' : '')}
                                 </span>
                               </div>
@@ -1852,7 +1893,7 @@ export default function Home() {
             </div>
 
             {/* Desktop table */}
-            <div className="hidden md:block overflow-hidden relative">
+            <div className={`hidden md:block mt-4 overflow-hidden relative bg-white rounded-xl border ${isDragOver ? 'border-ynab-green ring-2 ring-ynab-green/20' : 'border-ynab-border'}`}>
               <table className="w-full table-fixed text-sm">
                 <thead>
                   <tr className="bg-ynab-bg border-b border-ynab-border">
@@ -2035,7 +2076,7 @@ export default function Home() {
               const counts: Record<string, number> = {};
               deselected.forEach(s => { const l = getStatusBadge(s).label; counts[l] = (counts[l] || 0) + 1; });
               return (
-                <div className="px-4 py-2.5 border-t border-ynab-border text-[11px] text-ynab-muted">
+                <div className="px-1 mt-3 text-[13px] text-ynab-muted">
                   {Object.entries(counts).map(([label, n]) => `${n} ${label}`).join(', ')} deselected by default — check rows to include.
                 </div>
               );
@@ -2480,7 +2521,7 @@ export default function Home() {
 
       {/* Toast */}
       {showToast && (
-        <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 bg-ynab-navy text-white py-2.5 px-5 rounded-lg shadow-xl animate-fadeInUp text-sm flex items-center gap-2 max-w-[calc(100vw-2rem)]" role="alert">
+        <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 sm:left-auto sm:right-6 sm:translate-x-0 bg-ynab-navy text-white py-2.5 px-5 rounded-lg shadow-xl animate-fadeInUp text-sm flex items-center gap-2 max-w-[calc(100vw-2rem)]" role="alert">
           <svg className="w-4 h-4 text-ynab-green flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>

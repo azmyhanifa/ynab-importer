@@ -499,3 +499,10 @@ export function guessNeedsConfirm(guess: SmsGuess): boolean {
     (!guess.fields.payee && !isTransfer(guess.raw))
   );
 }
+
+export function isPlausibleSms(raw: string, guess?: SmsGuess): boolean {
+  const g = guess ?? guessSms(raw);
+  const amount = parseFloat(g.fields.amount);
+  if (!Number.isFinite(amount) || amount <= 0) return false;
+  return !!g.fields.last4 || !!g.fields.payee || isTransfer(g.raw);
+}
