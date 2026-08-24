@@ -1787,7 +1787,7 @@ export default function Home() {
                   <div className="px-1 pb-2 text-[13px] font-medium text-ynab-muted">
                     {formatDateHeader(group.date)}
                   </div>
-                  <div className="space-y-2">
+                  <div className="rounded-xl border border-ynab-border bg-white divide-y divide-ynab-border/40 overflow-hidden">
                     {group.indices.map(index => {
                       const transaction = convertedData[index];
                       const override = overriddenPayees[index];
@@ -1809,11 +1809,7 @@ export default function Home() {
                       return (
                         <div
                           key={index}
-                          className={`rounded-xl border px-3 py-2.5 ${
-                            isRowSelected
-                              ? 'bg-white border-ynab-border'
-                              : 'bg-white border-ynab-border/70 opacity-55'
-                          }`}
+                          className={`px-3 py-2.5 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/40 opacity-55'}`}
                         >
                           <div className="flex items-center gap-3">
                             <input
