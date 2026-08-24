@@ -2,6 +2,36 @@
 
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 
+function useVisualViewportBox() {
+  const [box, setBox] = useState(() => {
+    if (typeof window === 'undefined') return { top: 0, height: 0 };
+    const vv = window.visualViewport;
+    return { top: vv?.offsetTop ?? 0, height: vv?.height ?? window.innerHeight };
+  });
+
+  useEffect(() => {
+    const sync = () => {
+      const vv = window.visualViewport;
+      setBox({
+        top: vv?.offsetTop ?? 0,
+        height: vv?.height ?? window.innerHeight,
+      });
+    };
+    sync();
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', sync);
+    vv?.addEventListener('scroll', sync);
+    window.addEventListener('resize', sync);
+    return () => {
+      vv?.removeEventListener('resize', sync);
+      vv?.removeEventListener('scroll', sync);
+      window.removeEventListener('resize', sync);
+    };
+  }, []);
+
+  return box;
+}
+
 export const pickerInputClass =
   'w-full min-h-[40px] px-3 py-2 border border-gray-200 rounded-xl text-base text-foreground bg-white focus:outline-none focus:ring-2 focus:ring-ynab-green';
 
@@ -225,56 +255,103 @@ export function PickerSheet({
   const trimmed = query.trim();
   const exactMatch = options.some(o => o.toLowerCase() === trimmed.toLowerCase());
   const showCustom = allowCustom && trimmed.length > 0 && !exactMatch;
+  const viewport = useVisualViewportBox();
+
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+
+  const pick = (name: string) => {
+    onSelect(name);
+    onClose();
+  };
+
+  const touchStartY = useRef<number | null>(null);
+
+  const dismissKeyboard = () => {
+    const el = inputRef.current;
+    if (el && document.activeElement === el) el.blur();
+  };
+
+  const rowClass = (active: boolean) =>
+    `w-full min-h-[44px] text-left px-4 py-2.5 text-[15px] transition-colors flex items-center justify-between gap-2 ${
+      active ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-800 active:bg-gray-50'
+    }`;
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-[200] flex items-end" onClick={onClose}>
-      <div
-        data-payee-dropdown
-        onClick={e => e.stopPropagation()}
-        className="bg-white rounded-t-2xl shadow-2xl w-full max-h-[80vh] flex flex-col"
-      >
-        <div className="px-4 pt-3 pb-2 border-b border-gray-100">
-          <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
-          <div className="relative mt-2">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      data-payee-dropdown
+      className="fixed z-[200] bg-white flex flex-col"
+      style={{
+        top: viewport.top,
+        left: 0,
+        right: 0,
+        height: viewport.height || '100dvh',
+      }}
+    >
+        <div className="flex-shrink-0 px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 border-b border-gray-100">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-base font-semibold text-gray-900">{title}</h3>
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-sm font-semibold text-ynab-green min-h-[44px] px-1 -mr-1"
+            >
+              Done
+            </button>
+          </div>
+          <div className="relative mt-1">
             <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
             <input
               ref={inputRef}
               type="text"
-              inputMode="text"
+              inputMode="search"
               enterKeyHint="search"
               autoComplete="off"
               autoCorrect="off"
+              autoCapitalize="none"
               spellCheck={false}
               value={query}
               onChange={e => onQuery(e.target.value)}
               onKeyDown={e => {
                 if (e.key === 'Escape') onClose();
                 if (e.key === 'Enter' && options.length === 1) {
-                  onSelect(options[0]);
-                  onClose();
+                  pick(options[0]);
                 } else if (e.key === 'Enter' && showCustom) {
-                  onSelect(trimmed);
-                  onClose();
+                  pick(trimmed);
                 }
               }}
               placeholder={`Search ${title.toLowerCase()}…`}
-              className="w-full min-h-[40px] pl-9 pr-3 py-2 text-base border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-ynab-green"
+              className="w-full min-h-[44px] pl-9 pr-3 py-2 text-base border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-ynab-green"
             />
           </div>
         </div>
-        <div className="overflow-y-auto py-0.5 payee-scroll">
+        <div
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1 payee-scroll pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+          onTouchStart={e => {
+            touchStartY.current = e.touches[0]?.clientY ?? null;
+          }}
+          onTouchMove={e => {
+            const start = touchStartY.current;
+            const y = e.touches[0]?.clientY;
+            if (start == null || y == null) return;
+            if (Math.abs(y - start) > 12) dismissKeyboard();
+          }}
+        >
           {allowEmpty && (
             <button
               type="button"
-              onClick={() => {
-                onSelect('');
-                onClose();
-              }}
-              className={`w-full min-h-[36px] text-left px-4 py-1.5 text-sm ${
-                !current ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-500 active:bg-gray-50'
-              }`}
+              onClick={() => pick('')}
+              className={rowClass(!current)}
             >
               {emptyOptionLabel}
             </button>
@@ -282,11 +359,8 @@ export function PickerSheet({
           {showCustom && (
             <button
               type="button"
-              onClick={() => {
-                onSelect(trimmed);
-                onClose();
-              }}
-              className="w-full min-h-[36px] text-left px-4 py-1.5 text-sm text-ynab-navy active:bg-gray-50"
+              onClick={() => pick(trimmed)}
+              className={rowClass(false)}
             >
               Use “{trimmed}”
             </button>
@@ -298,13 +372,8 @@ export function PickerSheet({
                 <button
                   key={option}
                   type="button"
-                  onClick={() => {
-                    onSelect(option);
-                    onClose();
-                  }}
-                  className={`w-full min-h-[36px] text-left px-4 py-1.5 text-sm transition-colors flex items-center justify-between gap-2 ${
-                    selected ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-800 active:bg-gray-50'
-                  }`}
+                  onClick={() => pick(option)}
+                  className={rowClass(selected)}
                 >
                   <span className="min-w-0">
                     <span className="block truncate">{option}</span>
@@ -321,19 +390,9 @@ export function PickerSheet({
               );
             })
           ) : !showCustom ? (
-            <p className="px-4 py-4 text-sm text-gray-400 text-center">{emptyLabel}</p>
+            <p className="px-4 py-8 text-sm text-gray-400 text-center">{emptyLabel}</p>
           ) : null}
         </div>
-        <div className="px-4 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-gray-100">
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-full min-h-[40px] rounded-xl border border-gray-300 text-sm font-medium text-gray-700"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
