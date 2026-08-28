@@ -2214,7 +2214,7 @@ export default function Home() {
                       {pushUnmappedLast4.map(last4 => (
                         <div key={last4} className="space-y-2">
                           <label className="block text-sm font-medium text-gray-700">
-                            Card ending {last4}
+                            Ending {last4}
                           </label>
                           {pushAccountsLoading ? (
                             <p className="text-sm text-gray-500">Loading accounts…</p>
@@ -2293,7 +2293,7 @@ export default function Home() {
 
                   {!pushNeedsDefaultAccount && pushUnmappedLast4.length === 0 && selectedForPush.some(t => t.last4) && (
                     <p className="text-xs text-gray-500">
-                      SMS rows will go to the accounts linked to each card ending.
+                      SMS rows will go to the accounts linked to each ending.
                     </p>
                   )}
 
