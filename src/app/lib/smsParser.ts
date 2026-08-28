@@ -62,6 +62,9 @@ const MONEY_RE = /(?:(AED|USD|EUR|GBP|SAR|QAR|KWD|BHD|OMR)\s*)?([\d,]+\.\d{2}|\d
 const IGNORE_AMOUNT_RE = /\b(avl|avail(?:able)?|limit|balance|bal\.?|cr\.?\s*limit|available credit)\b/i;
 const LAST4_RE = /(?:ending[:\s]+|(?:card|cc)(?:\s+no\.?)?[:\s]+(?:xx+|[*x]{2,})?|(?:xx|[*x]{2,}))\s*(\d{4})/i;
 const LAST4_FALLBACK_RE = /(?:card|credit\s+card)[^\d]{0,20}(\d{4})/i;
+const MASKED_ACCOUNT_RE = /(?:account|a\/c|acct)[:\s]+(\d+[Xx*]+\d+(?:[Xx*]+\d+)*)/i;
+const LAST4_MASK_CAPTURE = '(?<last4>\\d+[Xx*]+\\d+(?:[Xx*]+\\d+)*)';
+const TYPE_PAYEE_RE = /\b(salary|deposit|bonus|interest|dividend|allowance)\s+of\b/i;
 const OUTFLOW_RE = /\b(purchase|payment|pos|withdrawal|withdrawn|spent|debit|paid|charge[ds]?)\b/i;
 const INFLOW_RE = /\b(refund(?:ed|s)?|credited|received|deposit|salary|reversed|reversal|cashback)\b/i;
 const REFUND_RE = /\brefund(?:ed|s)?\b|\breversed\b|\breversal\b|\bcashback\b/i;
@@ -69,6 +72,8 @@ const PURCHASE_LANG_RE = /\b(?:purchase|payment|pos|spent|charge[ds]?)\b/i;
 const MERCHANT_AT_RE = /\bat\s+\S/i;
 const TRANSFER_RE =
   /\b(?:has been\s+)?transferred\s+to your (?:card )?account\b|\bhas been transferred\b|\bfunds?\s+transfer(?:red)?\b|\b(?:inward|outward)\s+transfer\b|\btransferred from\b/i;
+const ACCOUNT_CREDIT_RE =
+  /\b(?:has been\s+)?(?:credited|deposited)\s+(?:in)?to\s+(?:your\s+)?(?:card\s+)?account\b/i;
 const PAYEE_STOP_RE =
   /(?:\s+with\s+(?:credit|debit)\s+card)|(?:\s+on\s+your\s+(?:credit|debit)\s+card)|(?:\s+has been\s+refunded)|(?:\s+ending\b)|(?:\s*\.(?:\s|$))|(?:\s+on\s+\d)|(?:\s+Avl\b)|(?:\s+Avail)|(?:\s+Balance\b)|(?:\s+Available\b)|(?:,?\s*\+\d)/i;
 const PHONE_TRAIL_RE = /,?\s*\+?\d[\d\s\-()]{6,}\s*$/;
@@ -155,6 +160,23 @@ export function isTransfer(raw: string): boolean {
   return TRANSFER_RE.test(raw);
 }
 
+export function isAccountCredit(raw: string): boolean {
+  if (isRefund(raw)) return false;
+  if (PURCHASE_LANG_RE.test(raw) && MERCHANT_AT_RE.test(raw)) return false;
+  return ACCOUNT_CREDIT_RE.test(raw);
+}
+
+function last4FromToken(token: string): string {
+  const digits = token.replace(/\D/g, '');
+  if (digits.length >= 4) return digits.slice(-4);
+  return digits;
+}
+
+function titleCaseWord(word: string): string {
+  if (!word) return word;
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+}
+
 function guessDirection(raw: string): SmsDirection {
   if (isRefund(raw)) return 'inflow';
   if (isTransfer(raw)) return 'inflow';
@@ -208,10 +230,18 @@ function findMoneyHits(raw: string): MoneyHit[] {
 
 function findLast4(raw: string): { value: string; start: number; end: number } | null {
   const m = LAST4_RE.exec(raw) || LAST4_FALLBACK_RE.exec(raw);
-  if (!m) return null;
-  const value = m[1];
-  const start = m.index + m[0].lastIndexOf(value);
-  return { value, start, end: start + 4 };
+  if (m) {
+    const value = m[1];
+    const start = m.index + m[0].lastIndexOf(value);
+    return { value, start, end: start + value.length };
+  }
+  const masked = MASKED_ACCOUNT_RE.exec(raw);
+  if (!masked) return null;
+  const token = masked[1];
+  const value = last4FromToken(token);
+  if (value.length < 2) return null;
+  const start = masked.index + masked[0].lastIndexOf(token);
+  return { value, start, end: start + token.length };
 }
 
 function stripCitySuffix(payee: string): string {
@@ -222,20 +252,30 @@ function stripPayeeNoise(payee: string): string {
   return stripCitySuffix(payee.replace(PHONE_TRAIL_RE, '').replace(/[.,;:\s]+$/g, '').trim());
 }
 
+function findTypePayee(raw: string): { value: string; start: number; end: number } | null {
+  const m = TYPE_PAYEE_RE.exec(raw);
+  if (!m) return null;
+  const value = titleCaseWord(m[1]);
+  return { value, start: m.index, end: m.index + m[1].length };
+}
+
 function findPayee(raw: string): { value: string; start: number; end: number } | null {
   if (isTransfer(raw)) return null;
   const marker = /\b(?:at|to)(?!\s+your\s+account)\s+/i.exec(raw);
-  if (!marker) return null;
-  const start = marker.index + marker[0].length;
-  const rest = raw.slice(start);
-  const endRel = rest.search(PAYEE_STOP_RE);
-  const rawEnd = endRel === -1 ? raw.length : start + endRel;
-  const original = raw.slice(start, rawEnd).trim();
-  const value = stripPayeeNoise(original);
-  if (!value || value.length > 80 || value === raw.trim()) return null;
-  const inRaw = raw.indexOf(value, start);
-  const spanStart = inRaw >= 0 ? inRaw : start;
-  return { value, start: spanStart, end: spanStart + value.length };
+  if (marker) {
+    const start = marker.index + marker[0].length;
+    const rest = raw.slice(start);
+    const endRel = rest.search(PAYEE_STOP_RE);
+    const rawEnd = endRel === -1 ? raw.length : start + endRel;
+    const original = raw.slice(start, rawEnd).trim();
+    const value = stripPayeeNoise(original);
+    if (value && value.length <= 80 && value !== raw.trim()) {
+      const inRaw = raw.indexOf(value, start);
+      const spanStart = inRaw >= 0 ? inRaw : start;
+      return { value, start: spanStart, end: spanStart + value.length };
+    }
+  }
+  return findTypePayee(raw);
 }
 
 export function guessSms(raw: string, fallbackDate?: string): SmsGuess {
@@ -419,6 +459,9 @@ export function compileTemplate(raw: string, fields: SmsParseFields): SmsTemplat
         cursor = span.end + phone[0].length;
         continue;
       }
+    } else if (span.field === 'last4') {
+      const token = text.slice(span.start, span.end);
+      pattern += /[x*]/i.test(token) ? LAST4_MASK_CAPTURE : fieldPattern('last4');
     } else {
       pattern += fieldPattern(span.field);
     }
@@ -478,7 +521,7 @@ export function matchTemplate(
     const fields: SmsParseFields = {
       amount,
       currency: (m.groups.currency || 'AED').toUpperCase(),
-      last4: m.groups.last4 || '',
+      last4: last4FromToken(m.groups.last4 || ''),
       payee,
       direction: guessDirection(text),
       date: parseDateString(text) || fallbackDate || todayISO(),
@@ -504,5 +547,5 @@ export function isPlausibleSms(raw: string, guess?: SmsGuess): boolean {
   const g = guess ?? guessSms(raw);
   const amount = parseFloat(g.fields.amount);
   if (!Number.isFinite(amount) || amount <= 0) return false;
-  return !!g.fields.last4 || !!g.fields.payee || isTransfer(g.raw);
+  return !!g.fields.last4 || !!g.fields.payee || isTransfer(g.raw) || isAccountCredit(g.raw);
 }
