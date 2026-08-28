@@ -33,10 +33,10 @@ export default function CardAccountModal({
     <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl w-full max-w-md overflow-hidden max-h-[92vh] flex flex-col">
         <div className="px-5 pt-5 pb-3 border-b border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900">Link card ending {last4}</h3>
+          <h3 className="text-lg font-semibold text-gray-900">Link ending {last4}</h3>
           <p className="text-sm text-gray-500 mt-0.5">
             We’ll send these SMS transactions to this YNAB account.
-            {remaining > 1 ? ` · ${remaining - 1} more cards` : ''}
+            {remaining > 1 ? ` · ${remaining - 1} more to link` : ''}
           </p>
         </div>
         <div className="px-5 py-4 overflow-y-auto space-y-2 max-h-72">

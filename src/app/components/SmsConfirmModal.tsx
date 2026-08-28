@@ -160,7 +160,7 @@ export default function SmsConfirmModal({
 
           <SearchPicker
             label="Account"
-            hint={fields.last4 ? `Card ending ${fields.last4}` : undefined}
+            hint={fields.last4 ? `Ending ${fields.last4}` : undefined}
             value={sortedAccounts.find(a => a.id === fields.accountId)?.name ?? ''}
             placeholder={accountsLoading ? 'Loading accounts…' : 'Search YNAB accounts'}
             options={sortedAccounts.map(a => a.name)}
