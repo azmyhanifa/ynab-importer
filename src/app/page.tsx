@@ -2223,7 +2223,7 @@ export default function Home() {
           >
             Source
           </a>
-          {' · '}Token stays in this browser
+          {' · '}Nothing is uploaded. Token stays in this browser
         </p>
         <p className="mt-1">
           Not affiliated with YNAB.{' '}

@@ -6,13 +6,14 @@ Paste bank SMS (or drop an Excel/CSV statement) and push the transactions into [
 
 Not a product. No account, no waitlist, no backend of mine.
 
-## How it handles your token
+## Privacy
 
-There are **no environment variables** and **no server-side secrets**. The app is a static Next.js frontend.
+There are **no environment variables** and **no server-side secrets**. The app is a static Next.js frontend. I do not get a copy of your data, and I do not use it for anything.
 
-- You paste a YNAB [personal access token](https://api.ynab.com/#personal-access-tokens)
-- It is stored in `localStorage` on your machine
+- Your YNAB [personal access token](https://api.ynab.com/#personal-access-tokens) is stored in `localStorage` on your machine
+- SMS, statements, payee maps, and card mappings stay in `localStorage` too
 - API calls go **browser → `api.ynab.com`**. Nothing is sent to a server I control
+- Nothing is sold, shared, trained on, or synced across devices
 - "Learns your formatting" is regex / pattern matching plus payee mappings in `localStorage`. No AI, no LLM
 
 If you'd rather not paste a token into a hosted page, run it locally.
