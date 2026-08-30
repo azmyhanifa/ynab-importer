@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Figtree, Geist_Mono, Outfit } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 const figtree = Figtree({
@@ -46,6 +47,7 @@ export default function RootLayout({
         className={`${figtree.variable} ${outfit.variable} ${geistMono.variable} antialiased`}
       >
         {children}
+        <Analytics />
       </body>
     </html>
   );
