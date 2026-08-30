@@ -49,6 +49,7 @@ const YNAB_API_BASE = 'https://api.ynab.com/v1';
 const YNAB_API_KEY_STORAGE = 'ynab_api_key';
 const YNAB_BUDGET_ID_STORAGE = 'ynab_budget_id';
 const YNAB_PAYEE_MAPPINGS_STORAGE = 'ynab_payee_mappings';
+const YNAB_PAT_DOCS_URL = 'https://api.ynab.com/#personal-access-tokens';
 
 function loadSavedMappings(): Record<string, string> {
   try {
@@ -243,6 +244,92 @@ interface YNABBudget {
   };
 }
 
+function YnabPatHelp({ className, linkClassName }: { className: string; linkClassName: string }) {
+  return (
+    <p className={className}>
+      Don&apos;t know what this is?{' '}
+      <a
+        href={YNAB_PAT_DOCS_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={linkClassName}
+      >
+        Check it out here
+      </a>
+    </p>
+  );
+}
+
+function YnabTokenInput({
+  value,
+  onChange,
+  onSubmit,
+  connecting,
+  autoFocus = false,
+  variant = 'light',
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  connecting: boolean;
+  autoFocus?: boolean;
+  variant?: 'light' | 'dark';
+}) {
+  const [show, setShow] = useState(false);
+  const dark = variant === 'dark';
+  return (
+    <div className="flex gap-2">
+      <div className="relative flex-1">
+        <input
+          type={show ? 'text' : 'password'}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && onSubmit()}
+          placeholder="Personal access token"
+          autoFocus={autoFocus}
+          autoComplete="off"
+          spellCheck={false}
+          className={
+            dark
+              ? 'w-full px-3 py-2 pr-8 bg-white/10 border border-white/20 rounded-lg text-base text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-ynab-green font-mono'
+              : 'w-full px-3 py-2.5 pr-9 bg-white border border-ynab-border rounded-lg text-base text-foreground placeholder-ynab-muted focus:outline-none focus:ring-2 focus:ring-ynab-green font-mono'
+          }
+        />
+        <button
+          type="button"
+          onClick={() => setShow(v => !v)}
+          className={dark ? 'absolute right-2 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70' : 'absolute right-2.5 top-1/2 -translate-y-1/2 text-ynab-muted hover:text-foreground'}
+          tabIndex={-1}
+          aria-label={show ? 'Hide token' : 'Show token'}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            {show ? (
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M3 3l18 18" />
+            ) : (
+              <>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </>
+            )}
+          </svg>
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={onSubmit}
+        disabled={connecting || !value.trim()}
+        className={
+          dark
+            ? 'px-3 py-2 bg-ynab-green text-white text-xs font-semibold rounded-lg hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all whitespace-nowrap'
+            : 'px-4 py-2.5 bg-ynab-green text-white text-sm font-semibold rounded-lg hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all whitespace-nowrap min-h-[44px]'
+        }
+      >
+        {connecting ? (dark ? '…' : 'Connecting…') : 'Connect'}
+      </button>
+    </div>
+  );
+}
+
 
 const ACCOUNT_TYPE_LABELS: Record<string, string> = {
   checking: 'Checking',
@@ -359,7 +446,8 @@ export default function Home() {
   // YNAB API state
   const [showYnabMenu, setShowYnabMenu] = useState(false);
   const [ynabApiKey, setYnabApiKey] = useState('');
-  const [showApiKey, setShowApiKey] = useState(false);
+  const [ynabChecked, setYnabChecked] = useState(false);
+  const [skipYnabConnect, setSkipYnabConnect] = useState(false);
   const [ynabConnecting, setYnabConnecting] = useState(false);
   const [ynabConnected, setYnabConnected] = useState(false);
   const [ynabBudgets, setYnabBudgets] = useState<YNABBudget[]>([]);
@@ -1056,17 +1144,24 @@ export default function Home() {
   useEffect(() => {
     const storedKey = localStorage.getItem(YNAB_API_KEY_STORAGE);
     const storedBudgetId = localStorage.getItem(YNAB_BUDGET_ID_STORAGE);
-    if (!storedKey) return;
+    if (!storedKey) {
+      setYnabChecked(true);
+      return;
+    }
 
     setYnabApiKey(storedKey);
     setYnabConnecting(true);
+    setYnabChecked(true);
 
     (async () => {
       try {
         const res = await fetch(`${YNAB_API_BASE}/budgets`, {
           headers: { Authorization: `Bearer ${storedKey}` },
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          setYnabError("Couldn't connect with the saved token. Paste a new one.");
+          return;
+        }
 
         const data = await res.json();
         const budgets: YNABBudget[] = data.data?.budgets ?? [];
@@ -1076,20 +1171,33 @@ export default function Home() {
         const targetBudgetId =
           storedBudgetId && budgets.some(b => b.id === storedBudgetId)
             ? storedBudgetId
-            : null;
+            : budgets.length === 1
+              ? budgets[0].id
+              : null;
 
         if (targetBudgetId) {
           setSelectedBudgetId(targetBudgetId);
+          localStorage.setItem(YNAB_BUDGET_ID_STORAGE, targetBudgetId);
           await fetchBudgetExtras(targetBudgetId, storedKey);
           fetchYnabAccounts(targetBudgetId, storedKey);
         }
       } catch (err) {
         console.error('Auto-connect failed', err);
+        setYnabError('Network error — make sure you have internet access.');
       } finally {
         setYnabConnecting(false);
       }
     })();
   }, [fetchYnabAccounts, fetchBudgetExtras]);
+
+  useEffect(() => {
+    if (!ynabConnected || selectedBudgetId || ynabBudgets.length !== 1 || !ynabApiKey) return;
+    const budgetId = ynabBudgets[0].id;
+    setSelectedBudgetId(budgetId);
+    localStorage.setItem(YNAB_BUDGET_ID_STORAGE, budgetId);
+    fetchBudgetExtras(budgetId, ynabApiKey);
+    fetchYnabAccounts(budgetId, ynabApiKey);
+  }, [ynabConnected, selectedBudgetId, ynabBudgets, ynabApiKey, fetchBudgetExtras, fetchYnabAccounts]);
 
   // Re-run merchant matching whenever transactions or payee list changes
   useEffect(() => {
@@ -1160,6 +1268,7 @@ export default function Home() {
       const budgets: YNABBudget[] = data.data?.budgets ?? [];
       setYnabBudgets(budgets);
       setYnabConnected(true);
+      setShowYnabMenu(false);
       localStorage.setItem(YNAB_API_KEY_STORAGE, key);
     } catch (err) {
       setYnabError('Network error — make sure you have internet access.');
@@ -1178,6 +1287,7 @@ export default function Home() {
     setYnabPayeeIdMap({});
     setYnabCategories([]);
     setMatchResults([]);
+    setSkipYnabConnect(false);
     localStorage.removeItem(YNAB_API_KEY_STORAGE);
     localStorage.removeItem(YNAB_BUDGET_ID_STORAGE);
   };
@@ -1537,51 +1647,21 @@ export default function Home() {
               <div className="absolute right-0 mt-2 w-[min(20rem,calc(100vw-1.5rem))] bg-ynab-purple rounded-xl shadow-2xl border border-white/10 overflow-hidden animate-fadeInUp">
                 {!ynabConnected ? (
                   <div className="p-4 space-y-3">
-                    <p className="text-white/70 text-xs">
-                      Paste your{' '}
-                      <a href="https://app.ynab.com/settings/developer" target="_blank" rel="noopener noreferrer" className="text-ynab-green hover:underline">
-                        Personal Access Token
-                      </a>
-                    </p>
-                    <div className="flex gap-2">
-                      <div className="relative flex-1">
-                        <input
-                          type={showApiKey ? 'text' : 'password'}
-                          value={ynabApiKey}
-                          onChange={(e) => { setYnabApiKey(e.target.value); setYnabError(''); }}
-                          onKeyDown={(e) => e.key === 'Enter' && connectYNAB()}
-                          placeholder="API key…"
-                          className="w-full px-3 py-2 pr-8 bg-white/10 border border-white/20 rounded-lg text-base text-white placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-ynab-green font-mono"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowApiKey(v => !v)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70"
-                          tabIndex={-1}
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            {showApiKey ? (
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M3 3l18 18" />
-                            ) : (
-                              <>
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                              </>
-                            )}
-                          </svg>
-                        </button>
-                      </div>
-                      <button
-                        onClick={connectYNAB}
-                        disabled={ynabConnecting || !ynabApiKey.trim()}
-                        className="px-3 py-2 bg-ynab-green text-white text-xs font-semibold rounded-lg hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all whitespace-nowrap"
-                      >
-                        {ynabConnecting ? '…' : 'Connect'}
-                      </button>
-                    </div>
+                    <p className="text-white/70 text-xs">Paste your personal access token</p>
+                    <YnabTokenInput
+                      value={ynabApiKey}
+                      onChange={v => { setYnabApiKey(v); setYnabError(''); }}
+                      onSubmit={connectYNAB}
+                      connecting={ynabConnecting}
+                      variant="dark"
+                    />
                     {ynabError && (
                       <p className="text-xs text-red-400">{ynabError}</p>
                     )}
+                    <YnabPatHelp
+                      className="text-white/45 text-xs leading-relaxed"
+                      linkClassName="text-ynab-green hover:underline"
+                    />
                   </div>
                 ) : (
                   <div>
@@ -1645,44 +1725,95 @@ export default function Home() {
         onDragOver={convertedData.length > 0 ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setIsDragOver(true); } : undefined}
         onDragLeave={convertedData.length > 0 ? () => setIsDragOver(false) : undefined}
       >
-        {/* Upload area — only shown when no file loaded */}
+        {/* Empty state: connect first, then import */}
         {convertedData.length === 0 && (
           <div className="mb-6">
-            <div
-              className={`rounded-lg border-2 border-dashed p-8 sm:p-12 text-center transition-all duration-200 ${
-                isDragOver
-                  ? 'border-ynab-green bg-ynab-green-light'
-                  : 'border-ynab-border hover:border-ynab-navy/30 bg-white'
-              }`}
-              onDrop={handleDrop}
-              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setIsDragOver(true); }}
-              onDragLeave={() => setIsDragOver(false)}
-            >
-              {isProcessing ? (
-                <div className="flex flex-col items-center">
-                  <div className="animate-spin rounded-full h-8 w-8 border-2 border-ynab-navy/20 border-t-ynab-navy mb-3" />
-                  <p className="text-sm font-medium text-foreground">Processing {fileName}…</p>
-                </div>
-              ) : (
-                <>
-                  <svg className="mx-auto h-8 w-8 text-ynab-navy/25 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                  </svg>
-                  <p className="font-medium text-foreground mb-1">Drop your bank statement here</p>
-                  <p className="text-ynab-muted text-sm mb-5">Excel files (.xlsx, .xls) — or paste a bank SMS</p>
-                  <div className="flex flex-wrap items-center justify-center gap-2">
-                    <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-upload" />
-                    <label
-                      htmlFor="file-upload"
-                      className="inline-flex items-center px-4 py-2 text-sm font-semibold rounded-md text-white bg-ynab-navy hover:bg-ynab-blue transition-colors cursor-pointer"
-                    >
-                      Choose File
-                    </label>
-                    <ClipboardPasteButton onPasteText={ingestSmsText} disabled={isProcessing} />
+            {!ynabChecked ? (
+              <div className="h-[240px]" aria-hidden />
+            ) : !ynabConnected && !skipYnabConnect ? (
+              <div className="max-w-lg mx-auto">
+                <div className="rounded-xl border border-ynab-border bg-white p-6 sm:p-8">
+                  <h2 className="text-[17px] font-semibold tracking-tight text-foreground">Connect to YNAB</h2>
+                  <p className="mt-1.5 text-sm text-ynab-muted">Paste your personal access token</p>
+                  <div className="mt-4">
+                    <YnabTokenInput
+                      value={ynabApiKey}
+                      onChange={v => { setYnabApiKey(v); setYnabError(''); }}
+                      onSubmit={connectYNAB}
+                      connecting={ynabConnecting}
+                      autoFocus
+                    />
                   </div>
-                </>
-              )}
-            </div>
+                  {ynabError && (
+                    <p className="mt-2 text-sm text-red-600">{ynabError}</p>
+                  )}
+                  <YnabPatHelp
+                    className="mt-3 text-sm text-ynab-muted"
+                    linkClassName="text-ynab-green font-medium hover:underline"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSkipYnabConnect(true)}
+                  className="mt-3 w-full min-h-[44px] px-4 py-2.5 rounded-xl border border-ynab-border bg-transparent text-sm text-ynab-muted hover:text-foreground hover:bg-white transition-colors"
+                >
+                  Convert your bank statement to a YNAB-friendly CSV
+                </button>
+              </div>
+            ) : ynabConnected && !selectedBudgetId && ynabBudgets.length > 1 ? (
+              <div className="rounded-xl border border-ynab-border bg-white p-6 sm:p-8 max-w-lg mx-auto">
+                <h2 className="text-[17px] font-semibold tracking-tight text-foreground">Pick a budget</h2>
+                <p className="mt-1.5 text-sm text-ynab-muted">This is the plan we&apos;ll match payees against and push transactions to.</p>
+                <select
+                  value={selectedBudgetId}
+                  onChange={e => selectBudget(e.target.value)}
+                  className="mt-4 w-full px-3 py-2.5 bg-white border border-ynab-border rounded-lg text-base text-foreground focus:outline-none focus:ring-2 focus:ring-ynab-green appearance-none cursor-pointer min-h-[44px]"
+                >
+                  <option value="">— Select a budget —</option>
+                  {ynabBudgets.map(b => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div
+                className={`rounded-lg border-2 border-dashed p-8 sm:p-12 text-center transition-all duration-200 ${
+                  isDragOver
+                    ? 'border-ynab-green bg-ynab-green-light'
+                    : 'border-ynab-border hover:border-ynab-navy/30 bg-white'
+                }`}
+                onDrop={handleDrop}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setIsDragOver(true); }}
+                onDragLeave={() => setIsDragOver(false)}
+              >
+                {isProcessing ? (
+                  <div className="flex flex-col items-center">
+                    <div className="animate-spin rounded-full h-8 w-8 border-2 border-ynab-navy/20 border-t-ynab-navy mb-3" />
+                    <p className="text-sm font-medium text-foreground">Processing {fileName}…</p>
+                  </div>
+                ) : (
+                  <>
+                    <svg className="mx-auto h-8 w-8 text-ynab-navy/25 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                    <p className="font-medium text-foreground mb-1">Drop your bank statement here</p>
+                    <p className="text-ynab-muted text-sm mb-5">Excel files (.xlsx, .xls) — or paste a bank SMS</p>
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <input type="file" accept=".xlsx,.xls" onChange={handleFileInput} className="hidden" id="file-upload" />
+                      <label
+                        htmlFor="file-upload"
+                        className="inline-flex items-center justify-center px-4 py-2.5 sm:py-2 text-sm font-semibold rounded-md border border-ynab-navy text-white bg-ynab-navy hover:bg-ynab-blue hover:border-ynab-blue transition-colors cursor-pointer whitespace-nowrap min-h-[44px]"
+                      >
+                        Choose File
+                      </label>
+                      <ClipboardPasteButton onPasteText={ingestSmsText} disabled={isProcessing} />
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -1751,7 +1882,7 @@ export default function Home() {
                   </span>
                 </div>
               )}
-              <div className={`grid gap-2 sm:flex sm:flex-wrap ${ynabConnected && selectedBudgetId ? 'grid-cols-3' : 'grid-cols-2'}`}>
+              <div className={`grid gap-2 sm:flex sm:flex-wrap sm:items-center ${ynabConnected && selectedBudgetId ? 'grid-cols-3' : 'grid-cols-2'}`}>
                 <ClipboardPasteButton compact onPasteText={ingestSmsText} className="w-full sm:w-auto" />
                 <button
                   onClick={downloadCSV}
@@ -1768,7 +1899,7 @@ export default function Home() {
                   <button
                     onClick={openPushModal}
                     disabled={selectedRows.size === 0}
-                    className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-[13px] sm:text-xs font-semibold rounded-lg text-white bg-ynab-green hover:brightness-110 disabled:opacity-40 transition-all whitespace-nowrap min-h-[44px] sm:min-h-0"
+                    className="inline-flex items-center justify-center px-3 py-2 sm:py-1.5 text-[13px] sm:text-xs font-semibold rounded-lg border border-ynab-green text-white bg-ynab-green hover:brightness-110 disabled:opacity-40 transition-all whitespace-nowrap min-h-[44px] sm:min-h-0"
                   >
                     <svg className="w-3.5 h-3.5 mr-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
