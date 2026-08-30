@@ -2,7 +2,7 @@
 
 Paste bank SMS (or drop an Excel/CSV statement) and push the transactions into [YNAB](https://www.ynab.com). Built for banks that don't link — UAE in particular.
 
-**Live:** [ynab-converter-self.vercel.app](https://ynab-converter-self.vercel.app)
+**Live:** [ynabimporter.azmyhanifa.com](https://ynabimporter.azmyhanifa.com/)
 
 Not a product. No account, no waitlist, no backend of mine.
 
