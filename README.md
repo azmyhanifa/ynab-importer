@@ -1,36 +1,52 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# YNAB Importer
 
-## Getting Started
+Paste bank SMS (or drop an Excel/CSV statement) and push the transactions into [YNAB](https://www.ynab.com). Built for banks that don't link — UAE in particular.
 
-First, run the development server:
+**Live:** [ynab-converter-self.vercel.app](https://ynab-converter-self.vercel.app)
+
+Not a product. No account, no waitlist, no backend of mine.
+
+## How it handles your token
+
+There are **no environment variables** and **no server-side secrets**. The app is a static Next.js frontend.
+
+- You paste a YNAB [personal access token](https://api.ynab.com/#personal-access-tokens)
+- It is stored in `localStorage` on your machine
+- API calls go **browser → `api.ynab.com`**. Nothing is sent to a server I control
+- "Learns your formatting" is regex / pattern matching plus payee mappings in `localStorage`. No AI, no LLM
+
+If you'd rather not paste a token into a hosted page, run it locally.
+
+The hosted Vercel deploy has [Vercel Analytics](https://vercel.com/docs/analytics) page views. That is page hits only — not your token, SMS, or budget.
+
+## Run locally
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun devå
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000). No `.env` file. No API keys to configure.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npx tsx scripts/verify-sms-parser.ts
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Use it
 
-## Learn More
+1. Create a token in YNAB → Account Settings → Developer Settings
+2. Paste it in the app
+3. Copy a bunch of bank SMS (or drop a statement) and confirm the rows
+4. Push into the YNAB account you pick
 
-To learn more about Next.js, take a look at the following resources:
+Card last-4 → YNAB account mappings and payee/category choices stick in `localStorage`.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Disclaimer
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+We are not affiliated, associated, or in any way officially connected with YNAB or any of its subsidiaries or affiliates. The official YNAB website can be found at [https://www.ynab.com](https://www.ynab.com).
 
-## Deploy on Vercel
+The names YNAB and You Need A Budget, as well as related names, tradenames, marks, trademarks, emblems, and images are registered trademarks of YNAB.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## License
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+MIT

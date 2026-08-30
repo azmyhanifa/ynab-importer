@@ -1,5 +1,3 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
 # dependencies
 /node_modules
 /.pnp
@@ -24,14 +22,17 @@
 .DS_Store
 *.pem
 
-# debug
+# debug / editor
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.log
+.cursor/
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files — this app does not use any. never commit them.
+.env
+.env.*
 
 # vercel
 .vercel

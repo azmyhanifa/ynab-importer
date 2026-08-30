@@ -8,7 +8,7 @@ import {
 } from '../src/app/lib/smsParser';
 
 const SALARY_SMS =
-  'Salary of AED 28,360.00 has been credited into your account 101XXX27XXX03. The available balance is AED 175,360.00.';
+  'Salary of AED 12,500.00 has been credited into your account 101XXX12XXX34. The available balance is AED 40,000.00.';
 
 const cases: {
   name: string;
@@ -26,13 +26,13 @@ const cases: {
 }[] = [
   {
     name: 'Amazon purchase is not a transfer',
-    sms: 'Purchase of AED 156.82 with Credit Card ending 3582 at Amazon.ae, Dubai. Avl Cr. Limit is AED 26,362.52',
-    expect: { payee: 'Amazon.ae', direction: 'outflow', transfer: false, amount: '156.82', last4: '3582', plausible: true },
+    sms: 'Purchase of AED 156.82 with Credit Card ending 4242 at Amazon.ae, Dubai. Avl Cr. Limit is AED 8,000.00',
+    expect: { payee: 'Amazon.ae', direction: 'outflow', transfer: false, amount: '156.82', last4: '4242', plausible: true },
   },
   {
     name: 'STARZPLAY refund is inflow',
-    sms: 'Purchase amount of AED 4.00 at STARZPLAY.COM on your Debit Card ending 6613 has been refunded to your card account. Avl Bal is AED 978.56.',
-    expect: { payee: 'STARZPLAY.COM', direction: 'inflow', transfer: false, amount: '4.00', last4: '6613', plausible: true },
+    sms: 'Purchase amount of AED 4.00 at STARZPLAY.COM on your Debit Card ending 1111 has been refunded to your card account. Avl Bal is AED 900.00.',
+    expect: { payee: 'STARZPLAY.COM', direction: 'inflow', transfer: false, amount: '4.00', last4: '1111', plausible: true },
   },
   {
     name: 'Real transfer to account',
@@ -46,8 +46,8 @@ const cases: {
       payee: 'Salary',
       direction: 'inflow',
       transfer: false,
-      amount: '28360.00',
-      last4: '2703',
+      amount: '12500.00',
+      last4: '1234',
       plausible: true,
       accountCredit: true,
       ignoredCount: 1,
@@ -55,13 +55,13 @@ const cases: {
   },
   {
     name: 'Credit into masked account without Salary of',
-    sms: 'AED 1,250.00 has been credited into your account 101XXX27XXX03. The available balance is AED 12,000.00.',
+    sms: 'AED 1,250.00 has been credited into your account 101XXX12XXX34. The available balance is AED 12,000.00.',
     expect: {
       payee: '',
       direction: 'inflow',
       transfer: false,
       amount: '1250.00',
-      last4: '2703',
+      last4: '1234',
       plausible: true,
       accountCredit: true,
     },
@@ -81,7 +81,7 @@ const cases: {
   },
   {
     name: 'Random amount text is not a bank SMS',
-    sms: 'The price is AED 28,360.00 for the sofa.',
+    sms: 'The price is AED 12,500.00 for the sofa.',
     expect: { payee: '', last4: '', plausible: false, accountCredit: false },
   },
   {

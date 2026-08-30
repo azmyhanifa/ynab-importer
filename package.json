@@ -2,6 +2,8 @@
   "name": "ynab-converter",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "description": "Paste bank SMS or Excel and push transactions into YNAB. Token stays in the browser.",
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",

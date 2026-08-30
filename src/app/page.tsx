@@ -50,6 +50,7 @@ const YNAB_API_KEY_STORAGE = 'ynab_api_key';
 const YNAB_BUDGET_ID_STORAGE = 'ynab_budget_id';
 const YNAB_PAYEE_MAPPINGS_STORAGE = 'ynab_payee_mappings';
 const YNAB_PAT_DOCS_URL = 'https://api.ynab.com/#personal-access-tokens';
+const SOURCE_URL = 'https://github.com/azmyhanifa/ynab-importer';
 
 function loadSavedMappings(): Record<string, string> {
   try {
@@ -1647,7 +1648,7 @@ export default function Home() {
               <div className="absolute right-0 mt-2 w-[min(20rem,calc(100vw-1.5rem))] bg-ynab-purple rounded-xl shadow-2xl border border-white/10 overflow-hidden animate-fadeInUp">
                 {!ynabConnected ? (
                   <div className="p-4 space-y-3">
-                    <p className="text-white/70 text-xs">Paste your personal access token</p>
+                    <p className="text-white/70 text-xs">Paste your personal access token. It stays in this browser.</p>
                     <YnabTokenInput
                       value={ynabApiKey}
                       onChange={v => { setYnabApiKey(v); setYnabError(''); }}
@@ -1734,7 +1735,7 @@ export default function Home() {
               <div className="max-w-lg mx-auto">
                 <div className="rounded-xl border border-ynab-border bg-white p-6 sm:p-8">
                   <h2 className="text-[17px] font-semibold tracking-tight text-foreground">Connect to YNAB</h2>
-                  <p className="mt-1.5 text-sm text-ynab-muted">Paste your personal access token</p>
+                  <p className="mt-1.5 text-sm text-ynab-muted">Paste your personal access token. It stays in this browser.</p>
                   <div className="mt-4">
                     <YnabTokenInput
                       value={ynabApiKey}
@@ -2211,6 +2212,31 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      <footer className="max-w-5xl mx-auto px-3 sm:px-6 lg:px-8 pb-8 pt-2 text-center text-[11px] leading-relaxed text-ynab-muted">
+        <p>
+          <a
+            href={SOURCE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-foreground underline underline-offset-2"
+          >
+            Source
+          </a>
+          {' · '}Token stays in this browser
+        </p>
+        <p className="mt-1">
+          Not affiliated with YNAB.{' '}
+          <a
+            href="https://www.ynab.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-foreground underline underline-offset-2"
+          >
+            ynab.com
+          </a>
+        </p>
+      </footer>
 
       {confirmQueue.length > 0 && confirmFields && (
         <SmsConfirmModal
