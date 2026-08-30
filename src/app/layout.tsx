@@ -1,11 +1,17 @@
 import type { Metadata } from "next";
-import { Figtree, Geist_Mono } from "next/font/google";
+import { Figtree, Geist_Mono, Outfit } from "next/font/google";
 import "./globals.css";
 
 const figtree = Figtree({
   variable: "--font-figtree",
   subsets: ["latin"],
   weight: ["400", "500", "600", "700"],
+});
+
+const outfit = Outfit({
+  variable: "--font-wordmark",
+  subsets: ["latin"],
+  weight: ["800"],
 });
 
 const geistMono = Geist_Mono({
@@ -37,7 +43,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body
-        className={`${figtree.variable} ${geistMono.variable} antialiased`}
+        className={`${figtree.variable} ${outfit.variable} ${geistMono.variable} antialiased`}
       >
         {children}
       </body>
