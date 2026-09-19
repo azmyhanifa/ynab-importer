@@ -43,6 +43,7 @@ import ClipboardPasteButton from './components/SmsPastePanel';
 import SmsConfirmModal from './components/SmsConfirmModal';
 import CardAccountModal from './components/CardAccountModal';
 import { PickerSheet } from './components/SearchPicker';
+import SwipeToDelete, { TrashIcon } from './components/SwipeToDelete';
 import type { YNABAccount, YNABTransaction } from './types';
 
 const YNAB_API_BASE = 'https://api.ynab.com/v1';
@@ -147,6 +148,25 @@ function DateChip({
       />
     </label>
   );
+}
+
+function dropIndexFromSet(set: Set<number>, removed: number) {
+  const next = new Set<number>();
+  set.forEach(i => {
+    if (i === removed) return;
+    next.add(i > removed ? i - 1 : i);
+  });
+  return next;
+}
+
+function dropIndexFromRecord<T>(record: Record<number, T>, removed: number) {
+  const next: Record<number, T> = {};
+  Object.entries(record).forEach(([key, value]) => {
+    const i = Number(key);
+    if (i === removed) return;
+    next[i > removed ? i - 1 : i] = value;
+  });
+  return next;
 }
 
 function groupIndicesByDate(data: YNABTransaction[]): { date: string; indices: number[] }[] {
@@ -480,6 +500,7 @@ export default function Home() {
 
   // Row selection
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
+  const [openSwipeIndex, setOpenSwipeIndex] = useState<number | null>(null);
 
   // Push to YNAB state
   const [showPushModal, setShowPushModal] = useState(false);
@@ -1481,6 +1502,39 @@ export default function Home() {
     setPickerSearch('');
   }, []);
 
+  const removeTransaction = useCallback((index: number) => {
+    setFixRowIndex(curr => {
+      if (curr === null) return curr;
+      if (curr === index) {
+        setConfirmQueue([]);
+        setConfirmFields(null);
+        return null;
+      }
+      return curr > index ? curr - 1 : curr;
+    });
+    setEditingIndex(curr => {
+      if (curr === null) return curr;
+      if (curr === index) {
+        setEditingKind(null);
+        setDropdownPos(null);
+        setPickerSearch('');
+        return null;
+      }
+      return curr > index ? curr - 1 : curr;
+    });
+    setOpenSwipeIndex(null);
+    setConvertedData(prev => {
+      const next = prev.filter((_, i) => i !== index);
+      if (next.length === 0) setFileName('');
+      return next;
+    });
+    setTransactionStatuses(prev => prev.filter((_, i) => i !== index));
+    setMatchResults(prev => (prev.length ? prev.filter((_, i) => i !== index) : prev));
+    setSelectedRows(prev => dropIndexFromSet(prev, index));
+    setOverriddenPayees(prev => dropIndexFromRecord(prev, index));
+    displayToast('Removed');
+  }, []);
+
   const selectBudget = async (budgetId: string) => {
     setSelectedBudgetId(budgetId);
     setYnabPayees([]);
@@ -1581,6 +1635,7 @@ export default function Home() {
     index: number,
     kind: 'payee' | 'category' | 'account',
   ) => {
+    setOpenSwipeIndex(null);
     setEditingIndex(index);
     setEditingKind(kind);
     setPickerSearch('');
@@ -2104,9 +2159,16 @@ export default function Home() {
                         : (transaction.Memo || '').replace(/\s+/g, ' ').trim();
 
                       return (
-                        <div
-                          key={index}
-                          className={`px-3 py-2.5 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg/40 opacity-55'}`}
+                        <SwipeToDelete
+                          key={`${transaction.Date}|${transaction.Payee}|${transaction.Memo}|${transaction.Outflow}|${transaction.Inflow}|${index}`}
+                          open={openSwipeIndex === index}
+                          onOpenChange={isOpen => {
+                            if (isOpen) closePicker();
+                            setOpenSwipeIndex(prev => (isOpen ? index : prev === index ? null : prev));
+                          }}
+                          onDelete={() => removeTransaction(index)}
+                          surfaceClassName={`px-3 py-2.5 ${isRowSelected ? 'bg-white' : 'bg-ynab-bg'}`}
+                          dimmed={!isRowSelected}
                         >
                           <div className="flex items-center gap-3">
                             <input
@@ -2183,7 +2245,7 @@ export default function Home() {
                               </div>
                             </div>
                           </div>
-                        </div>
+                        </SwipeToDelete>
                       );
                     })}
                   </div>
@@ -2216,6 +2278,9 @@ export default function Home() {
                     {transactionStatuses.some(s => s) && (
                       <th className="w-[5.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Status</th>
                     )}
+                    <th className="w-10 px-1 py-2">
+                      <span className="sr-only">Remove</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-ynab-border/60">
@@ -2365,6 +2430,16 @@ export default function Home() {
                             ) : null}
                           </td>
                         )}
+                        <td className="w-10 px-1 py-2.5 align-middle">
+                          <button
+                            type="button"
+                            onClick={() => removeTransaction(index)}
+                            aria-label="Remove transaction"
+                            className="p-1.5 rounded-md text-ynab-muted/45 hover:text-red-600 hover:bg-red-50 focus-visible:text-red-600"
+                          >
+                            <TrashIcon className="w-4 h-4" />
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
