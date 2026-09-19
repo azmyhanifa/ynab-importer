@@ -464,7 +464,7 @@ export default function Home() {
   const [overriddenPayees, setOverriddenPayees] = useState<Record<number, string>>({});
   const [transactionStatuses, setTransactionStatuses] = useState<string[]>([]);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [editingKind, setEditingKind] = useState<'payee' | 'category' | null>(null);
+  const [editingKind, setEditingKind] = useState<'payee' | 'category' | 'account' | null>(null);
   const [pickerSearch, setPickerSearch] = useState('');
   const [dropdownPos, setDropdownPos] = useState<{
     top?: number;
@@ -500,6 +500,7 @@ export default function Home() {
   const [confirmFields, setConfirmFields] = useState<SmsParseFields | null>(null);
   const [fixRowIndex, setFixRowIndex] = useState<number | null>(null);
   const [pendingMapLast4, setPendingMapLast4] = useState<string[]>([]);
+  const [editingCardLast4, setEditingCardLast4] = useState<string | null>(null);
   const [draftReady, setDraftReady] = useState(false);
 
   const displayToast = (message: string) => {
@@ -527,6 +528,22 @@ export default function Home() {
       ),
     );
   }, []);
+
+  const forgetCardAccount = useCallback((last4: string) => {
+    const removedId = cardAccounts[last4];
+    setCardAccounts(prev => {
+      const next = { ...prev };
+      delete next[last4];
+      saveCardAccounts(next);
+      return next;
+    });
+    if (!removedId) return;
+    setConvertedData(prev =>
+      prev.map(t =>
+        t.last4 === last4 && t.accountId === removedId ? { ...t, accountId: undefined } : t,
+      ),
+    );
+  }, [cardAccounts]);
 
   const rememberDate = useCallback((date: string) => {
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
@@ -1137,9 +1154,9 @@ export default function Home() {
   useEffect(() => {
     if (!ynabConnected || !selectedBudgetId || !ynabApiKey) return;
     if (pushAccounts.length > 0) return;
-    if (convertedData.length === 0 && confirmQueue.length === 0) return;
+    if (convertedData.length === 0 && confirmQueue.length === 0 && !showYnabMenu) return;
     fetchYnabAccounts(selectedBudgetId, ynabApiKey);
-  }, [confirmQueue.length, convertedData.length, ynabConnected, selectedBudgetId, ynabApiKey, fetchYnabAccounts, pushAccounts.length]);
+  }, [confirmQueue.length, convertedData.length, showYnabMenu, ynabConnected, selectedBudgetId, ynabApiKey, fetchYnabAccounts, pushAccounts.length]);
 
   // Auto-connect and restore last budget on mount
   useEffect(() => {
@@ -1453,6 +1470,10 @@ export default function Home() {
     }
   }, [convertedData, overriddenPayees, matchResults]);
 
+  const overrideAccount = useCallback((index: number, accountId: string) => {
+    setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, accountId } : t)));
+  }, []);
+
   const closePicker = useCallback(() => {
     setEditingIndex(null);
     setEditingKind(null);
@@ -1476,7 +1497,10 @@ export default function Home() {
 
   // Close YNAB menu on outside click
   useEffect(() => {
-    if (!showYnabMenu) return;
+    if (!showYnabMenu) {
+      setEditingCardLast4(null);
+      return;
+    }
     const handler = (e: MouseEvent) => {
       if (ynabMenuRef.current && !ynabMenuRef.current.contains(e.target as Node)) {
         setShowYnabMenu(false);
@@ -1491,7 +1515,12 @@ export default function Home() {
     if (editingIndex === null) return;
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as Element;
-      if (!target.closest('[data-payee-dropdown]') && !target.closest('[data-payee-cell]') && !target.closest('[data-category-cell]')) {
+      if (
+        !target.closest('[data-payee-dropdown]') &&
+        !target.closest('[data-payee-cell]') &&
+        !target.closest('[data-category-cell]') &&
+        !target.closest('[data-account-cell]')
+      ) {
         closePicker();
       }
     };
@@ -1524,10 +1553,33 @@ export default function Home() {
     return categoryOptions.filter(p => p.toLowerCase().includes(q)).slice(0, 50);
   }, [pickerSearch, categoryOptions]);
 
+  const sortedPushAccounts = useMemo(
+    () => pushAccounts.slice().sort((a, b) => Number(b.on_budget) - Number(a.on_budget)),
+    [pushAccounts],
+  );
+
+  const accountMeta = useMemo(
+    () =>
+      Object.fromEntries(
+        sortedPushAccounts.map(a => [
+          a.name,
+          `${ACCOUNT_TYPE_LABELS[a.type] ?? a.type}${a.on_budget ? '' : ' · off-budget'}`,
+        ]),
+      ),
+    [sortedPushAccounts],
+  );
+
+  const filteredAccounts = useMemo(() => {
+    const q = pickerSearch.trim().toLowerCase();
+    const names = sortedPushAccounts.map(a => a.name);
+    if (!q) return names.slice(0, 40);
+    return names.filter(n => n.toLowerCase().includes(q)).slice(0, 50);
+  }, [pickerSearch, sortedPushAccounts]);
+
   const openRowPicker = (
     e: React.MouseEvent<HTMLElement>,
     index: number,
-    kind: 'payee' | 'category',
+    kind: 'payee' | 'category' | 'account',
   ) => {
     setEditingIndex(index);
     setEditingKind(kind);
@@ -1574,15 +1626,56 @@ export default function Home() {
     openRowPicker(e, index, 'category');
   };
 
+  const handleAccountClick = (e: React.MouseEvent<HTMLElement>, index: number) => {
+    if (pushAccounts.length === 0) return;
+    openRowPicker(e, index, 'account');
+  };
+
   const selectedBudget = ynabBudgets.find(b => b.id === selectedBudgetId);
   const allSelected = convertedData.length > 0 && selectedRows.size === convertedData.length;
-  const hasAccountColumn = convertedData.some(t => t.last4 || t.accountId);
+  const hasAccountColumn =
+    convertedData.some(t => t.last4 || t.accountId) || pushAccounts.length > 0;
   const resolvedAccountId = (t: YNABTransaction) =>
     t.accountId || (t.last4 ? cardAccounts[t.last4] : undefined);
   const resolvedAccountName = (t: YNABTransaction) => {
     const id = resolvedAccountId(t);
     if (!id) return '';
     return pushAccounts.find(a => a.id === id)?.name ?? '';
+  };
+
+  const pickerOptions =
+    editingKind === 'category'
+      ? filteredCategories
+      : editingKind === 'account'
+        ? filteredAccounts
+        : filteredPayees;
+
+  const pickerCurrent = (index: number) => {
+    if (editingKind === 'account') {
+      const row = convertedData[index];
+      return row ? resolvedAccountName(row) : '';
+    }
+    if (editingKind === 'category') return convertedData[index]?.categoryName ?? '';
+    return (
+      overriddenPayees[index] ??
+      (matchResults[index]?.confidence >= 0.6
+        ? matchResults[index]?.payee
+        : convertedData[index]?.Payee)
+    );
+  };
+
+  const applyPickerOption = (index: number, option: string) => {
+    if (editingKind === 'category') {
+      const cat = findCategoryByLabel(ynabCategories, option);
+      overrideCategory(index, cat?.id ?? '', cat?.name ?? option);
+      return;
+    }
+    if (editingKind === 'account') {
+      const account = sortedPushAccounts.find(a => a.name === option);
+      if (account) overrideAccount(index, account.id);
+      return;
+    }
+    overridePayee(index, option);
   };
   const selectedForPush = convertedData.filter((_, i) => selectedRows.has(i));
   const pushUnmappedLast4 = [
@@ -1704,6 +1797,78 @@ export default function Home() {
                         <span className="text-white/40 text-xs">Select a budget above</span>
                       )}
                     </div>
+
+                    {/* Linked cards */}
+                    {Object.keys(cardAccounts).length > 0 && (
+                      <div className="px-4 py-3 border-b border-white/10">
+                        <p className="text-white/40 text-[11px] uppercase tracking-wide font-semibold">Linked cards</p>
+                        <div className="mt-2 -mx-1 max-h-56 overflow-y-auto payee-scroll">
+                          {Object.entries(cardAccounts).map(([last4, accountId]) => {
+                            const linked = pushAccounts.find(a => a.id === accountId);
+                            const isEditing = editingCardLast4 === last4;
+                            return (
+                              <div key={last4}>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingCardLast4(isEditing ? null : last4)}
+                                    className="flex-1 min-w-0 flex items-center gap-2 px-1 py-2 rounded-lg text-left hover:bg-white/5 transition-colors"
+                                  >
+                                    <span className="text-white/90 text-xs font-medium tabular-nums flex-shrink-0">•• {last4}</span>
+                                    <span className={`text-xs truncate ${linked ? 'text-white/50' : 'text-amber-400/80'}`}>
+                                      {linked?.name ?? (pushAccountsLoading ? 'Loading…' : 'Unknown account')}
+                                    </span>
+                                    <svg
+                                      className={`w-3 h-3 text-white/30 ml-auto flex-shrink-0 transition-transform ${isEditing ? 'rotate-180' : ''}`}
+                                      fill="none"
+                                      stroke="currentColor"
+                                      viewBox="0 0 24 24"
+                                    >
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      forgetCardAccount(last4);
+                                      setEditingCardLast4(null);
+                                    }}
+                                    className="flex-shrink-0 px-1.5 py-2 text-[11px] text-white/40 hover:text-red-400 transition-colors"
+                                  >
+                                    Unlink
+                                  </button>
+                                </div>
+                                {isEditing && (
+                                  <div className="mb-1 max-h-40 overflow-y-auto payee-scroll">
+                                    {sortedPushAccounts.map(account => (
+                                      <button
+                                        key={account.id}
+                                        type="button"
+                                        onClick={() => {
+                                          rememberCardAccount(last4, account.id);
+                                          setEditingCardLast4(null);
+                                        }}
+                                        className={`w-full text-left px-2.5 py-2 rounded-lg text-xs transition-colors ${
+                                          account.id === accountId
+                                            ? 'bg-white/10 text-white font-medium'
+                                            : 'text-white/60 hover:bg-white/5'
+                                        }`}
+                                      >
+                                        <span className="block truncate">{account.name}</span>
+                                        <span className="block text-[10px] text-white/30">
+                                          {ACCOUNT_TYPE_LABELS[account.type] ?? account.type}
+                                          {account.on_budget ? '' : ' · off-budget'}
+                                        </span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Disconnect */}
                     <button
@@ -2006,9 +2171,15 @@ export default function Home() {
                                     <span className="text-[11px] text-ynab-muted truncate">{memoPreview}</span>
                                   )}
                                 </div>
-                                <span className={`text-[11px] leading-none truncate max-w-[6.75rem] flex-shrink-0 ${accountName ? 'text-ynab-muted' : 'text-ynab-border'}`}>
-                                  {accountName || (transaction.last4 || transaction.accountId ? 'Unmapped' : '')}
-                                </span>
+                                <button
+                                  type="button"
+                                  data-account-cell
+                                  onClick={e => handleAccountClick(e, index)}
+                                  aria-label={accountName ? `Change account, currently ${accountName}` : 'Set account'}
+                                  className={`text-[11px] leading-none truncate max-w-[6.75rem] flex-shrink-0 rounded px-0.5 -mx-0.5 py-1 -my-1 active:bg-ynab-bg ${accountName ? 'text-ynab-muted' : 'text-ynab-border'}`}
+                                >
+                                  {accountName || 'Set account'}
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -2022,19 +2193,19 @@ export default function Home() {
 
             {/* Desktop table */}
             <div className={`hidden md:block mt-4 overflow-hidden relative bg-white rounded-xl border ${isDragOver ? 'border-ynab-green ring-2 ring-ynab-green/20' : 'border-ynab-border'}`}>
-              <table className="w-full table-fixed text-sm">
+              <table className="w-full table-fixed text-[13px]">
                 <thead>
                   <tr className="bg-ynab-bg border-b border-ynab-border">
                     <th className="w-10 px-3 py-2">
                       <button
                         onClick={() => setSelectedRows(allSelected ? new Set() : new Set(convertedData.map((_, i) => i)))}
-                        className="text-[10px] font-semibold text-ynab-muted hover:text-ynab-navy transition-colors uppercase tracking-wide"
+                        className="text-[11px] font-semibold text-ynab-muted hover:text-ynab-navy transition-colors uppercase tracking-wide"
                         title={allSelected ? 'Deselect all' : 'Select all'}
                       >
                         {allSelected ? 'None' : 'All'}
                       </button>
                     </th>
-                    <th className="w-[9.5rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
+                    <th className="w-[8rem] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Date</th>
                     <th className="w-[20%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Payee</th>
                     <th className="w-[18%] px-3 py-2 text-left text-[11px] font-semibold text-ynab-muted uppercase tracking-wider">Category</th>
                     {hasAccountColumn && (
@@ -2083,7 +2254,7 @@ export default function Home() {
                             : 'bg-ynab-bg/30 opacity-50 hover:opacity-70'
                         }`}
                       >
-                        <td className="w-10 px-3 py-2 align-middle">
+                        <td className="w-10 px-3 py-2.5 align-middle">
                           <input
                             type="checkbox"
                             checked={isRowSelected}
@@ -2097,7 +2268,7 @@ export default function Home() {
                             className="rounded border-ynab-border text-ynab-green focus:ring-ynab-green accent-ynab-green"
                           />
                         </td>
-                        <td className="px-3 py-2 align-middle">
+                        <td className="px-3 py-2.5 align-middle">
                           <input
                             type="date"
                             value={transaction.Date}
@@ -2106,23 +2277,23 @@ export default function Home() {
                               rememberDate(v);
                               setConvertedData(prev => prev.map((t, i) => (i === index ? { ...t, Date: v } : t)));
                             }}
-                            className="bg-transparent text-ynab-muted text-xs font-mono w-[8.5rem] leading-none focus:outline-none focus:text-foreground"
+                            className="bg-transparent text-ynab-muted text-[12px] tabular-nums w-[7rem] leading-5 focus:outline-none focus:text-foreground"
                           />
                         </td>
                         <td
                           data-payee-cell
                           onClick={(e) => handlePayeeClick(e, index)}
-                          className={`px-3 py-2 align-middle max-w-0 ${isEditable ? 'cursor-pointer' : ''}`}
+                          className={`px-3 py-2.5 align-middle max-w-0 ${isEditable ? 'cursor-pointer' : ''}`}
                         >
                           <div className="flex items-center gap-1.5 min-w-0">
                             {matchResults.length > 0 && (
                               <span title={tooltipText} className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotColor}`} />
                             )}
-                            <span className={`font-medium truncate ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
+                            <span className={`font-medium leading-5 truncate ${isMatched || isOverridden ? 'text-foreground' : 'text-ynab-muted'}`}>
                               {displayPayee}
                             </span>
                             {(isMatched && match.payee !== transaction.Payee) && (
-                              <span className="text-[11px] text-ynab-muted/70 truncate max-w-[5.5rem] flex-shrink-0" title={transaction.Payee}>
+                              <span className="text-[12px] leading-5 text-ynab-muted/70 truncate max-w-[5.5rem] flex-shrink-0" title={transaction.Payee}>
                                 ← {transaction.Payee}
                               </span>
                             )}
@@ -2131,11 +2302,11 @@ export default function Home() {
                         <td
                           data-category-cell
                           onClick={(e) => handleCategoryClick(e, index)}
-                          className="px-3 py-2 align-middle max-w-0 cursor-pointer"
+                          className="px-3 py-2.5 align-middle max-w-0 cursor-pointer"
                         >
                           <span
                             title={transaction.categoryName || 'Uncategorized'}
-                            className={`inline-flex items-center max-w-full px-2 py-0.5 rounded-full text-[11px] leading-tight ${
+                            className={`inline-flex items-center max-w-full px-2 py-0.5 rounded-full text-[12px] leading-5 ${
                               transaction.categoryName ? 'bg-gray-100 text-gray-700' : 'bg-gray-50 text-gray-400'
                             }`}
                           >
@@ -2143,23 +2314,27 @@ export default function Home() {
                           </span>
                         </td>
                         {hasAccountColumn && (
-                          <td className="px-3 py-2 align-middle max-w-0">
+                          <td
+                            data-account-cell
+                            onClick={e => handleAccountClick(e, index)}
+                            className="px-3 py-2.5 align-middle max-w-0 cursor-pointer"
+                          >
                             {accountName ? (
-                              <span className="block text-xs text-ynab-muted truncate" title={accountName}>
+                              <span className="block text-[12px] leading-5 text-ynab-muted truncate" title={accountName}>
                                 {accountName}
                               </span>
                             ) : (
-                              <span className="text-[11px] text-ynab-border">Unmapped</span>
+                              <span className="text-[12px] leading-5 text-ynab-border">Set account</span>
                             )}
                           </td>
                         )}
-                        <td className="px-3 py-2 align-middle text-ynab-muted text-xs max-w-0">
+                        <td className="px-3 py-2.5 align-middle text-ynab-muted text-[12px] leading-5 max-w-0">
                           <div className="flex items-center gap-1.5 min-w-0">
                             {transaction.source === 'sms' && (
                               <button
                                 type="button"
                                 onClick={() => openFixFormat(index)}
-                                className="flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-ynab-navy/10 text-ynab-navy hover:bg-ynab-navy/20"
+                                className="flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[11px] leading-5 font-medium bg-ynab-navy/10 text-ynab-navy hover:bg-ynab-navy/20"
                                 title="Fix SMS format"
                               >
                                 SMS
@@ -2168,10 +2343,10 @@ export default function Home() {
                             <span className="min-w-0 truncate" title={transaction.Memo}>{transaction.Memo}</span>
                           </div>
                         </td>
-                        <td className="px-3 py-2 pr-4 align-middle whitespace-nowrap text-right">
+                        <td className="px-3 py-2.5 pr-4 align-middle whitespace-nowrap text-right">
                           {amount ? (
                             <span
-                              className={`inline-block tabular-nums font-semibold text-sm ${
+                              className={`inline-block tabular-nums font-semibold leading-5 ${
                                 isInflow
                                   ? 'rounded-md bg-ynab-green-light text-ynab-green px-1.5 py-0.5'
                                   : 'text-foreground'
@@ -2182,9 +2357,9 @@ export default function Home() {
                           ) : null}
                         </td>
                         {transactionStatuses.some(s => s) && (
-                          <td className="px-3 py-2 align-middle whitespace-nowrap">
+                          <td className="px-3 py-2.5 align-middle whitespace-nowrap">
                             {transactionStatuses[index] ? (
-                              <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
+                              <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] leading-5 font-medium ${getStatusBadge(transactionStatuses[index]).color}`}>
                                 {getStatusBadge(transactionStatuses[index]).label}
                               </span>
                             ) : null}
@@ -2540,18 +2715,18 @@ export default function Home() {
                 onChange={(e) => setPickerSearch(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') closePicker();
-                  const list = editingKind === 'category' ? filteredCategories : filteredPayees;
-                  if (e.key === 'Enter' && list.length === 1) {
-                    if (editingKind === 'category') {
-                      const cat = findCategoryByLabel(ynabCategories, list[0]);
-                      overrideCategory(editingIndex, cat?.id ?? '', cat?.name ?? list[0]);
-                    } else {
-                      overridePayee(editingIndex, list[0]);
-                    }
+                  if (e.key === 'Enter' && pickerOptions.length === 1) {
+                    applyPickerOption(editingIndex, pickerOptions[0]);
                     closePicker();
                   }
                 }}
-                placeholder={editingKind === 'category' ? 'Search categories…' : 'Search payees…'}
+                placeholder={
+                  editingKind === 'category'
+                    ? 'Search categories…'
+                    : editingKind === 'account'
+                      ? 'Search accounts…'
+                      : 'Search payees…'
+                }
                 className="w-full pl-7 pr-3 py-1.5 text-base border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
               />
             </div>
@@ -2569,29 +2744,19 @@ export default function Home() {
                 Uncategorized
               </button>
             )}
-            {(editingKind === 'category' ? filteredCategories : filteredPayees).length > 0 ? (
-              (editingKind === 'category' ? filteredCategories : filteredPayees).map((option) => {
-                const currentPayee =
-                  overriddenPayees[editingIndex] ??
-                  (matchResults[editingIndex]?.confidence >= 0.6
-                    ? matchResults[editingIndex]?.payee
-                    : convertedData[editingIndex]?.Payee);
-                const currentCat = convertedData[editingIndex]?.categoryName;
+            {pickerOptions.length > 0 ? (
+              pickerOptions.map((option) => {
+                const current = pickerCurrent(editingIndex);
                 const isCurrent =
                   editingKind === 'category'
-                    ? option === currentCat || option.endsWith(` · ${currentCat}`)
-                    : option === currentPayee;
+                    ? option === current || option.endsWith(` · ${current}`)
+                    : option === current;
                 return (
                   <button
                     key={option}
                     type="button"
                     onClick={() => {
-                      if (editingKind === 'category') {
-                        const cat = findCategoryByLabel(ynabCategories, option);
-                        overrideCategory(editingIndex, cat?.id ?? '', cat?.name ?? option);
-                      } else {
-                        overridePayee(editingIndex, option);
-                      }
+                      applyPickerOption(editingIndex, option);
                       closePicker();
                     }}
                     className={`w-full min-h-[36px] text-left px-3 py-1.5 text-sm transition-colors flex items-center justify-between gap-2 ${
@@ -2600,7 +2765,12 @@ export default function Home() {
                         : 'text-gray-700 hover:bg-gray-50'
                     }`}
                   >
-                    <span className="truncate">{option}</span>
+                    <span className="min-w-0">
+                      <span className="block truncate">{option}</span>
+                      {editingKind === 'account' && accountMeta[option] && (
+                        <span className="block text-[11px] text-gray-400 font-normal">{accountMeta[option]}</span>
+                      )}
+                    </span>
                     {isCurrent && (
                       <svg className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                         <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -2611,13 +2781,21 @@ export default function Home() {
               })
             ) : (
               <p className="px-3 py-3 text-sm text-gray-400 text-center">
-                {editingKind === 'category' ? 'No categories found' : 'No payees found'}
+                {editingKind === 'category'
+                  ? 'No categories found'
+                  : editingKind === 'account'
+                    ? 'No accounts found'
+                    : 'No payees found'}
               </p>
             )}
           </div>
           <div className="flex-shrink-0 px-3 py-2 border-t border-gray-100 flex items-center justify-between">
             <span className="text-xs text-gray-400">
-              {editingKind === 'category' ? `${ynabCategories.length} categories` : `${ynabPayees.length} payees total`}
+              {editingKind === 'category'
+                ? `${ynabCategories.length} categories`
+                : editingKind === 'account'
+                  ? `${pushAccounts.length} accounts`
+                  : `${ynabPayees.length} payees total`}
             </span>
             <button type="button" onClick={closePicker} className="text-xs text-gray-400 hover:text-gray-600">
               Cancel (Esc)
@@ -2669,6 +2847,21 @@ export default function Home() {
           inputRef={pickerSearchRef}
           allowEmpty
           emptyLabel={ynabCategories.length ? 'No categories found' : 'Connect YNAB to pick a category'}
+        />
+      )}
+
+      {editingIndex !== null && !dropdownPos && editingKind === 'account' && (
+        <PickerSheet
+          title="Account"
+          query={pickerSearch}
+          onQuery={setPickerSearch}
+          options={filteredAccounts}
+          optionMeta={accountMeta}
+          current={pickerCurrent(editingIndex)}
+          onSelect={name => applyPickerOption(editingIndex, name)}
+          onClose={closePicker}
+          inputRef={pickerSearchRef}
+          emptyLabel={pushAccounts.length ? 'No accounts found' : 'Connect YNAB to pick an account'}
         />
       )}
 
