@@ -1,0 +1,23 @@
+{
+  "name": "YNAB Importer",
+  "short_name": "YNAB",
+  "description": "Convert bank statements and push transactions to YNAB",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1e1f3b",
+  "theme_color": "#1e1f3b",
+  "icons": [
+    {
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

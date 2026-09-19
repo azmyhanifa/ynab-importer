@@ -23,8 +23,26 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "YNAB Importer",
   description: "Convert bank statements and push transactions to YNAB",
+  applicationName: "YNAB Importer",
+  manifest: "/manifest.webmanifest",
   icons: {
-    icon: "/favicon.svg",
+    icon: [
+      { url: "/favicon.svg", type: "image/svg+xml" },
+      { url: "/favicon.ico", sizes: "any" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180" }],
+    other: [
+      {
+        rel: "mask-icon",
+        url: "/safari-pinned-tab.svg",
+        color: "#555af5",
+      },
+    ],
+  },
+  appleWebApp: {
+    capable: true,
+    title: "YNAB Importer",
+    statusBarStyle: "black-translucent",
   },
 };
 
@@ -34,6 +52,7 @@ export const viewport = {
   maximumScale: 1,
   userScalable: false,
   viewportFit: "cover" as const,
+  themeColor: "#1e1f3b",
 };
 
 export default function RootLayout({
