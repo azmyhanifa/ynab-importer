@@ -2174,6 +2174,7 @@ export default function Home() {
                             <input
                               type="checkbox"
                               checked={isRowSelected}
+                              onPointerDown={e => e.stopPropagation()}
                               onChange={() => {
                                 setSelectedRows(prev => {
                                   const next = new Set(prev);

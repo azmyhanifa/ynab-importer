@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 
 const ACTION_WIDTH = 84;
-const OPEN_THRESHOLD = 40;
-const DIRECTION_LOCK = 8;
+const OPEN_THRESHOLD = 36;
+const COMMIT_DISTANCE = 100;
+const DIRECTION_LOCK = 12;
 
 export function TrashIcon({ className }: { className?: string }) {
   return (
@@ -51,6 +52,7 @@ export default function SwipeToDelete({
   const draggingRef = useRef(false);
   const suppressClick = useRef(false);
   const pointerId = useRef<number | null>(null);
+  const detachRef = useRef<(() => void) | null>(null);
 
   const [offset, setOffset] = useState(0);
   const [dragging, setDragging] = useState(false);
@@ -81,20 +83,27 @@ export default function SwipeToDelete({
     return () => el.removeEventListener('touchmove', blockScroll);
   }, []);
 
+  // Another row took over — snap this one shut. Never snap open from the
+  // prop; that raced with taps and left rows stuck on Delete.
   useEffect(() => {
     if (draggingRef.current) return;
-    setOff(open ? -ACTION_WIDTH : 0);
+    if (!open && offsetRef.current !== 0) setOff(0);
   }, [open]);
 
+  useEffect(() => () => detachRef.current?.(), []);
+
   const commitDelete = () => {
+    detachRef.current?.();
+    draggingRef.current = false;
+    setDragging(false);
     onOpenChange(false);
     onDelete();
   };
 
   const settle = () => {
     const width = rowWidth || rootRef.current?.getBoundingClientRect().width || 320;
-    const commitAt = Math.max(ACTION_WIDTH + 28, Math.min(width * 0.42, 156));
-    const flick = velocity.current < -0.7 && offsetRef.current < -24;
+    const commitAt = Math.max(COMMIT_DISTANCE, Math.min(width * 0.3, 120));
+    const flick = velocity.current < -0.45 && offsetRef.current < -20;
     if (offsetRef.current <= -commitAt || flick) {
       commitDelete();
       return;
@@ -108,6 +117,65 @@ export default function SwipeToDelete({
     onOpenChange(false);
   };
 
+  const trackMove = (clientX: number, clientY: number) => {
+    const dx = clientX - startX.current;
+    const dy = clientY - startY.current;
+    if (!lock.current) {
+      if (Math.abs(dx) < DIRECTION_LOCK && Math.abs(dy) < DIRECTION_LOCK) return;
+      lock.current = Math.abs(dx) > Math.abs(dy) * 1.15 ? 'h' : 'v';
+      if (lock.current === 'h') {
+        draggingRef.current = true;
+        setDragging(true);
+        onOpenChange(true);
+      }
+    }
+    if (lock.current !== 'h') return;
+    if (Math.abs(dx) > 16) suppressClick.current = true;
+    const now = performance.now();
+    velocity.current = (clientX - lastX.current) / Math.max(now - lastT.current, 1);
+    lastX.current = clientX;
+    lastT.current = now;
+
+    let next = startOffset.current + dx;
+    if (next > 0) next *= 0.18;
+    const maxLeft = -(Math.max(rowWidth, 1) * 0.92);
+    if (next < maxLeft) next = maxLeft + (next - maxLeft) * 0.2;
+    setOff(next);
+  };
+
+  const endGesture = () => {
+    pointerId.current = null;
+    detachRef.current?.();
+    detachRef.current = null;
+    if (lock.current === 'h') {
+      if (performance.now() - lastT.current > 80) velocity.current = 0;
+      draggingRef.current = false;
+      setDragging(false);
+      settle();
+    }
+    lock.current = null;
+  };
+
+  const attachWindow = () => {
+    detachRef.current?.();
+    const onMove = (event: PointerEvent) => {
+      if (pointerId.current !== event.pointerId) return;
+      trackMove(event.clientX, event.clientY);
+    };
+    const onUp = (event: PointerEvent) => {
+      if (pointerId.current !== event.pointerId) return;
+      endGesture();
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    detachRef.current = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  };
+
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || isFormControl(event.target)) return;
     pointerId.current = event.pointerId;
@@ -118,52 +186,7 @@ export default function SwipeToDelete({
     lastT.current = performance.now();
     velocity.current = 0;
     lock.current = null;
-  };
-
-  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (pointerId.current !== event.pointerId) return;
-    const dx = event.clientX - startX.current;
-    const dy = event.clientY - startY.current;
-    if (!lock.current) {
-      if (Math.abs(dx) < DIRECTION_LOCK && Math.abs(dy) < DIRECTION_LOCK) return;
-      lock.current = Math.abs(dx) > Math.abs(dy) * 1.05 ? 'h' : 'v';
-      if (lock.current === 'h') {
-        draggingRef.current = true;
-        setDragging(true);
-        suppressClick.current = true;
-        onOpenChange(true);
-        rootRef.current?.setPointerCapture(event.pointerId);
-      }
-    }
-    if (lock.current !== 'h') return;
-    const now = performance.now();
-    const dt = Math.max(now - lastT.current, 1);
-    velocity.current = (event.clientX - lastX.current) / dt;
-    lastX.current = event.clientX;
-    lastT.current = now;
-
-    let next = startOffset.current + dx;
-    if (next > 0) next = next * 0.18;
-    const maxLeft = -(rowWidth * 0.92);
-    if (next < maxLeft) next = maxLeft + (next - maxLeft) * 0.2;
-    setOff(next);
-  };
-
-  const endPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (pointerId.current !== event.pointerId) return;
-    pointerId.current = null;
-    if (lock.current === 'h') {
-      if (performance.now() - lastT.current > 80) velocity.current = 0;
-      draggingRef.current = false;
-      setDragging(false);
-      settle();
-    }
-    lock.current = null;
-    try {
-      rootRef.current?.releasePointerCapture(event.pointerId);
-    } catch {
-      /* already released */
-    }
+    attachWindow();
   };
 
   return (
@@ -187,10 +210,11 @@ export default function SwipeToDelete({
           touchAction: 'pan-y',
         }}
         onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={endPointer}
-        onPointerCancel={endPointer}
         onClickCapture={event => {
+          if (isFormControl(event.target)) {
+            suppressClick.current = false;
+            return;
+          }
           if (suppressClick.current) {
             event.preventDefault();
             event.stopPropagation();
