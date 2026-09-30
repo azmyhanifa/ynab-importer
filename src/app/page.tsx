@@ -2048,7 +2048,7 @@ export default function Home() {
 
         {/* Transactions */}
         {convertedData.length > 0 && !isProcessing && (
-          <div className="relative">
+          <div className="relative pb-24">
 
             {/* Drop-to-replace overlay */}
             {isDragOver && (
@@ -2103,8 +2103,7 @@ export default function Home() {
                   </span>
                 </div>
               )}
-              <div className={`grid gap-2 sm:flex sm:flex-wrap sm:items-center ${ynabConnected && selectedBudgetId ? 'grid-cols-3' : 'grid-cols-2'}`}>
-                <ClipboardPasteButton compact onPasteText={ingestSmsText} className="w-full sm:w-auto" />
+              <div className={`grid gap-2 sm:flex sm:flex-wrap sm:items-center ${ynabConnected && selectedBudgetId ? 'grid-cols-2' : 'grid-cols-1'}`}>
                 <button
                   onClick={downloadCSV}
                   disabled={selectedRows.size === 0}
@@ -2942,8 +2941,22 @@ export default function Home() {
       )}
 
       {/* Toast */}
+      {convertedData.length > 0 && (
+        <ClipboardPasteButton
+          floating
+          onPasteText={ingestSmsText}
+          disabled={isProcessing}
+        />
+      )}
       {showToast && (
-        <div className="fixed bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 -translate-x-1/2 sm:left-auto sm:right-6 sm:translate-x-0 bg-ynab-navy text-white py-2.5 px-5 rounded-lg shadow-xl animate-fadeInUp text-sm flex items-center gap-2 max-w-[calc(100vw-2rem)]" role="alert">
+        <div
+          className={`fixed z-[45] left-1/2 -translate-x-1/2 bg-ynab-navy text-white py-2.5 px-5 rounded-lg shadow-xl animate-fadeInUp text-sm flex items-center gap-2 max-w-[calc(100vw-2rem)] ${
+            convertedData.length > 0
+              ? 'bottom-[max(5.5rem,calc(env(safe-area-inset-bottom)+4.25rem))]'
+              : 'bottom-[max(1.5rem,env(safe-area-inset-bottom))]'
+          }`}
+          role="alert"
+        >
           <svg className="w-4 h-4 text-ynab-green flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>

@@ -2,16 +2,31 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+function ClipboardIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+      />
+    </svg>
+  );
+}
+
 export default function ClipboardPasteButton({
   onPasteText,
   compact = false,
   disabled = false,
   className = '',
+  floating = false,
 }: {
   onPasteText: (text: string) => void;
   compact?: boolean;
   disabled?: boolean;
   className?: string;
+  floating?: boolean;
 }) {
   const [catcherOpen, setCatcherOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -51,32 +66,37 @@ export default function ClipboardPasteButton({
 
   return (
     <>
-      <button
-        type="button"
-        onClick={handleClick}
-        disabled={disabled || busy}
-        className={`${buttonClass} ${className}`}
-      >
-        <svg
-          className={compact ? 'w-3.5 h-3.5 mr-1.5 text-ynab-muted' : 'w-4 h-4 mr-1.5 text-ynab-navy/70'}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
+      {floating ? (
+        <button
+          type="button"
+          onClick={handleClick}
+          disabled={disabled || busy}
+          aria-label={busy ? 'Pasting' : 'Paste from clipboard'}
+          title="Paste from clipboard"
+          className={`fixed z-40 flex items-center justify-center w-14 h-14 rounded-full bg-ynab-navy text-white shadow-lg shadow-ynab-navy/30 hover:bg-ynab-blue active:scale-95 disabled:opacity-40 transition-[background-color,transform,opacity] duration-150 ease-out touch-manipulation right-[max(1.25rem,env(safe-area-inset-right))] bottom-[max(1.25rem,calc(env(safe-area-inset-bottom)+0.75rem))] ${className}`}
         >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-          />
-        </svg>
-        {busy ? 'Pasting…' : (
-          <>
-            <span className="sm:hidden">{compact ? 'Paste' : 'Paste from clipboard'}</span>
-            <span className="hidden sm:inline">Paste from clipboard</span>
-          </>
-        )}
-      </button>
+          {busy ? (
+            <span className="w-5 h-5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
+          ) : (
+            <ClipboardIcon className="w-6 h-6" />
+          )}
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={handleClick}
+          disabled={disabled || busy}
+          className={`${buttonClass} ${className}`}
+        >
+          <ClipboardIcon className={compact ? 'w-3.5 h-3.5 mr-1.5 text-ynab-muted' : 'w-4 h-4 mr-1.5 text-ynab-navy/70'} />
+          {busy ? 'Pasting…' : (
+            <>
+              <span className="sm:hidden">{compact ? 'Paste' : 'Paste from clipboard'}</span>
+              <span className="hidden sm:inline">Paste from clipboard</span>
+            </>
+          )}
+        </button>
+      )}
 
       {catcherOpen && (
         <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center p-0 sm:p-4 z-50">
