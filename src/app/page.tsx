@@ -101,27 +101,40 @@ function fieldsForConfirm(
   };
 }
 
-function formatDateHeader(iso: string): string {
-  if (!iso) return 'No date';
+function parseISODate(iso: string): Date | null {
   const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  return new Date(y, m - 1, d).toLocaleDateString('en-US', {
+  if (!y || !m || !d) return null;
+  const date = new Date(y, m - 1, d);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+function formatDateHeader(iso: string, now = new Date()): string {
+  if (!iso) return 'No date';
+  const date = parseISODate(iso);
+  if (!date) return iso;
+
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const daysAgo = Math.round((today.getTime() - date.getTime()) / 86_400_000);
+  if (daysAgo >= 0 && daysAgo < 7) {
+    const weekday = date.toLocaleDateString('en-US', { weekday: 'long' });
+    return `${weekday} · ${formatShortDate(iso, now)}`;
+  }
+
+  return date.toLocaleDateString('en-US', {
     month: 'long',
     day: 'numeric',
     year: 'numeric',
   });
 }
 
-function formatShortDate(iso: string): string {
+function formatShortDate(iso: string, now = new Date()): string {
   if (!iso) return 'Date';
-  const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  const date = new Date(y, m - 1, d);
-  if (isNaN(date.getTime())) return iso;
+  const date = parseISODate(iso);
+  if (!date) return iso;
   return date.toLocaleDateString('en-GB', {
     day: 'numeric',
     month: 'short',
-    ...(y !== new Date().getFullYear() ? { year: '2-digit' as const } : {}),
+    ...(date.getFullYear() !== now.getFullYear() ? { year: '2-digit' as const } : {}),
   });
 }
 
